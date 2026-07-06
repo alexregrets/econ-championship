@@ -128,6 +128,24 @@ class RoleShellApp(App[None]):
             return None
         return round_.id
 
+    def _lead_team_id(self) -> int | None:
+        """Команда для lead-действий: поле ввода приоритетнее памяти роли.
+
+        Lead может фиксировать решения нескольких команд подряд, просто меняя
+        id в поле, — без обязательного «входа в роль» каждой из них. Если поле
+        пустое, берём команду, в чью роль входили последней.
+        """
+        raw = self.query_one("#team_input", Input).value.strip()
+        if raw:
+            if not raw.isdigit():
+                self._write("[red]Введите числовой id команды.[/]")
+                return None
+            return int(raw)
+        if self._team_id is not None:
+            return self._team_id
+        self._write("[red]Введите id команды.[/]")
+        return None
+
     # -- button dispatch -------------------------------------------------- #
 
     async def on_button_pressed(self, event: Button.Pressed) -> None:
@@ -237,7 +255,7 @@ class RoleShellApp(App[None]):
 
     async def _action_lead_view(self) -> None:
         """Экран lead-роли: предложения, агрегат и what-if против Нэша."""
-        team_id = self._team_id if self._team_id is not None else self._read_team_id()
+        team_id = self._lead_team_id()
         if team_id is None:
             return
         round_id = await self._open_round_id()
@@ -273,7 +291,7 @@ class RoleShellApp(App[None]):
 
     async def _action_lead_commit(self) -> None:
         """Зафиксировать финальный Q команды (из поля Q) как решение lead-роли."""
-        team_id = self._team_id if self._team_id is not None else self._read_team_id()
+        team_id = self._lead_team_id()
         if team_id is None:
             return
         quantity = self._read_quantity()
