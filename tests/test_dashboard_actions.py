@@ -11,13 +11,16 @@ from collections.abc import AsyncIterator
 
 import pytest
 import pytest_asyncio
+from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import create_async_engine
 from sqlmodel import SQLModel
 from sqlmodel.ext.asyncio.session import AsyncSession
 
+from core.rubric_grader import GradingResult, RubricCriterion
 from dashboard.actions import (
     close_round_with_results,
     create_and_open_round,
+    grade_round_reasoning,
     next_round_number,
     results_table,
     submit_manual_decision,
@@ -25,6 +28,7 @@ from dashboard.actions import (
 from db import models  # noqa: F401  (регистрирует таблицы)
 from db import repositories as repo
 from db.enums import Method, RoundStatus
+from llm.base import LLMError
 
 
 @pytest_asyncio.fixture
@@ -149,3 +153,161 @@ async def test_results_table_skips_unscored_decisions(
     )
     # Раунд не закрывали — Result ещё не посчитан, таблица должна быть пустой.
     assert await results_table(session, round_id) == []
+
+
+# --------------------------------------------------------------------------- #
+# grade_round_reasoning: LLM-грейдинг закрытого раунда (mock LLM, без сети)
+# --------------------------------------------------------------------------- #
+
+
+class _FakeGradingLLM:
+    """Фейковый StructuredLLM: «зачитывает» ровно заданные критерии.
+
+    Возвращает passed=True для критериев из ``passed_ids`` и ничего для
+    остальных — по семантике грейдера пропущенные считаются проваленными.
+    """
+
+    def __init__(self, passed_ids: set[str]) -> None:
+        self.passed_ids = passed_ids
+        self.calls = 0
+
+    async def structured_completion[T: BaseModel](
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        response_model: type[T],
+        *,
+        temperature: float = 0.1,
+        max_retries: int = 3,
+    ) -> T:
+        self.calls += 1
+        grades = [
+            {"criterion_id": cid, "passed": True, "evidence": "цитата"}
+            for cid in sorted(self.passed_ids)
+        ]
+        return response_model(grades=grades)
+
+
+class _ExplodingLLM:
+    """Фейковый StructuredLLM, имитирующий недоступный Groq."""
+
+    async def structured_completion[T: BaseModel](
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        response_model: type[T],
+        *,
+        temperature: float = 0.1,
+        max_retries: int = 3,
+    ) -> T:
+        raise LLMError("groq недоступен (fake)")
+
+
+async def _closed_duopoly_round(session: AsyncSession) -> int:
+    """Подготовить закрытый раунд-дуополию с обоснованиями, вернуть id."""
+    round_id = await _make_round(session)
+    team_a = await repo.create_team(session, name="А", company_name="Роснефть")
+    team_b = await repo.create_team(session, name="Б", company_name="Газпром")
+    assert team_a.id is not None and team_b.id is not None
+    await submit_manual_decision(
+        session,
+        team_id=team_a.id,
+        round_id=round_id,
+        quantity=30.0,
+        reasoning="Оценили спрос парной регрессией, наклон отрицательный.",
+    )
+    await submit_manual_decision(
+        session,
+        team_id=team_b.id,
+        round_id=round_id,
+        quantity=20.0,
+        reasoning="Q выбрали из ожидаемой цены по модели.",
+    )
+    await close_round_with_results(session, round_id)
+    return round_id
+
+
+async def test_grade_round_writes_real_rubric_scores(
+    session: AsyncSession,
+) -> None:
+    """Проходят specification (0.3) и interpretation (0.3) → score 0.6."""
+    round_id = await _closed_duopoly_round(session)
+    llm = _FakeGradingLLM({"specification", "interpretation"})
+
+    rows = await grade_round_reasoning(session, round_id, llm)
+
+    assert llm.calls == 2  # по одному вызову на решение
+    assert len(rows) == 2
+    for row in rows:
+        assert row.rubric_score == pytest.approx(0.6)
+    # Рыночные числа не тронуты: победитель по-прежнему с прибылью 1200.
+    assert rows[0].market_score == pytest.approx(1200.0)
+    assert rows[0].price == pytest.approx(50.0)
+
+    # Полный GradingResult сохранён для аудита и содержит все 4 критерия.
+    decisions = await repo.list_decisions_for_round(session, round_id)
+    assert decisions[0].id is not None
+    stored = await repo.get_result_for_decision(session, decisions[0].id)
+    assert stored is not None
+    breakdown = GradingResult.model_validate_json(stored.rubric_breakdown_json)
+    assert len(breakdown.grades) == 4
+    assert breakdown.total_score == pytest.approx(0.6)
+
+    # Пилотная рубрика заведена в БД как RubricTemplate.
+    template = await repo.get_rubric_for_method(session, Method.OLS_SIMPLE)
+    assert template is not None
+    assert "specification" in template.criteria_json
+
+
+async def test_grade_round_requires_closed_round(session: AsyncSession) -> None:
+    round_id = await _make_round(session)  # раунд открыт
+    with pytest.raises(ValueError):
+        await grade_round_reasoning(session, round_id, _FakeGradingLLM(set()))
+
+
+async def test_grade_failure_leaves_market_results_intact(
+    session: AsyncSession,
+) -> None:
+    """Groq упал → LLMError наружу, рыночные результаты и score не тронуты."""
+    round_id = await _closed_duopoly_round(session)
+    with pytest.raises(LLMError):
+        await grade_round_reasoning(session, round_id, _ExplodingLLM())
+
+    rows = await results_table(session, round_id)
+    assert len(rows) == 2
+    assert rows[0].market_score == pytest.approx(1200.0)
+    assert all(row.rubric_score == 0.0 for row in rows)
+
+
+async def test_grade_respects_existing_rubric_template(
+    session: AsyncSession,
+) -> None:
+    """Свой RubricTemplate в БД имеет приоритет над пилотной рубрикой."""
+    round_id = await _closed_duopoly_round(session)
+    custom = [RubricCriterion(id="only", description="один критерий", weight=1.0)]
+    await repo.upsert_rubric_template(
+        session,
+        method=Method.OLS_SIMPLE,
+        name="Своя рубрика",
+        criteria_json=f'[{custom[0].model_dump_json()}]',
+    )
+
+    rows = await grade_round_reasoning(session, round_id, _FakeGradingLLM({"only"}))
+    assert all(row.rubric_score == pytest.approx(1.0) for row in rows)
+
+    # Свой шаблон не перезаписан пилотным.
+    template = await repo.get_rubric_for_method(session, Method.OLS_SIMPLE)
+    assert template is not None
+    assert template.name == "Своя рубрика"
+
+
+async def test_grade_rerun_overwrites_scores(session: AsyncSession) -> None:
+    """Повторная оценка перезаписывает score — операция идемпотентна."""
+    round_id = await _closed_duopoly_round(session)
+    all_ids = {"specification", "interpretation", "quantity_link", "fit_check"}
+
+    rows = await grade_round_reasoning(session, round_id, _FakeGradingLLM(all_ids))
+    assert all(row.rubric_score == pytest.approx(1.0) for row in rows)
+
+    rows = await grade_round_reasoning(session, round_id, _FakeGradingLLM(set()))
+    assert all(row.rubric_score == 0.0 for row in rows)

@@ -12,21 +12,72 @@ from __future__ import annotations
 
 from dataclasses import dataclass
 
+from pydantic import TypeAdapter
 from sqlmodel.ext.asyncio.session import AsyncSession
 
+from config import settings
+from core.rubric_grader import RubricCriterion, grade_submission
 from db import repositories as repo
 from db.enums import Method, RoundStatus
 from db.models import Decision, Round
+from llm.base import StructuredLLM
+from llm.groq_client import GroqClient
 from services.round_service import close_round, open_round
 
 __all__ = [
+    "DEFAULT_OLS_SIMPLE_RUBRIC",
     "ResultRow",
     "next_round_number",
     "create_and_open_round",
     "submit_manual_decision",
     "close_round_with_results",
     "results_table",
+    "ensure_rubric_for_method",
+    "grade_round_reasoning",
+    "build_grading_llm",
 ]
+
+# Пилотная рубрика для парной регрессии: используется, если профессор ещё не
+# завёл свой RubricTemplate для метода. Веса в сумме дают 1.0, но грейдер
+# нормирует на сумму весов сам, так что это не жёсткое требование.
+DEFAULT_OLS_SIMPLE_RUBRIC: list[RubricCriterion] = [
+    RubricCriterion(
+        id="specification",
+        description=(
+            "Указана спецификация парной регрессии: что зависимая переменная, "
+            "что объясняющая (например, спрос от цены)."
+        ),
+        weight=0.3,
+    ),
+    RubricCriterion(
+        id="interpretation",
+        description=(
+            "Коэффициент наклона интерпретирован по знаку и смыслу "
+            "(как изменение фактора влияет на спрос/цену)."
+        ),
+        weight=0.3,
+    ),
+    RubricCriterion(
+        id="quantity_link",
+        description=(
+            "Выбранный объём Q обоснован оценкой спроса или ожидаемой цены, "
+            "а не назван произвольно."
+        ),
+        weight=0.3,
+    ),
+    RubricCriterion(
+        id="fit_check",
+        description=(
+            "Упомянута проверка качества модели: R², значимость коэффициентов "
+            "или анализ остатков."
+        ),
+        weight=0.1,
+    ),
+]
+
+_CRITERIA_ADAPTER: TypeAdapter[list[RubricCriterion]] = TypeAdapter(
+    list[RubricCriterion]
+)
 
 
 @dataclass(frozen=True)
@@ -174,3 +225,120 @@ async def results_table(session: AsyncSession, round_id: int) -> list[ResultRow]
     # Сортировка по прибыли — победители сверху, как на лидерборде.
     rows.sort(key=lambda r: r.market_score, reverse=True)
     return rows
+
+
+def build_grading_llm() -> StructuredLLM:
+    """Собрать Groq-клиент для грейдинга из настроек.
+
+    Вынесено в отдельную фабрику, чтобы страница не знала про Groq напрямую,
+    а проверочные сценарии могли подменить её фейковым LLM.
+
+    Raises
+    ------
+    ValueError
+        Если GROQ_API_KEY не задан в окружении/.env (сообщение — своё,
+        понятное профессору, а не голое «api_key must not be empty»).
+    """
+    if not settings.groq_api_key:
+        raise ValueError(
+            "GROQ_API_KEY не задан — добавьте ключ в .env, чтобы оценивать "
+            "обоснования (рыночные результаты от этого не зависят)"
+        )
+    return GroqClient(settings.groq_api_key)
+
+
+async def ensure_rubric_for_method(
+    session: AsyncSession, method: Method
+) -> list[RubricCriterion]:
+    """Вернуть рубрику метода; для OLS_SIMPLE без шаблона — завести пилотную.
+
+    Читает RubricTemplate через существующий репозиторий. Если шаблона нет и
+    метод — парная регрессия (наш единственный сценарий), пилотная рубрика
+    сохраняется в БД через upsert_rubric_template: профессор потом сможет её
+    поправить, а повторные оценки будут читать уже сохранённую версию.
+
+    Raises
+    ------
+    ValueError
+        Если шаблона нет и метод не OLS_SIMPLE (рубрики других методов —
+        вне скоупа, молча выдумывать их нельзя).
+    """
+    template = await repo.get_rubric_for_method(session, method)
+    if template is not None:
+        return _CRITERIA_ADAPTER.validate_json(template.criteria_json)
+    if method is not Method.OLS_SIMPLE:
+        raise ValueError(
+            f"для метода {method.value} не задана рубрика — заведите "
+            "RubricTemplate прежде чем оценивать"
+        )
+    criteria_json = _CRITERIA_ADAPTER.dump_json(DEFAULT_OLS_SIMPLE_RUBRIC).decode(
+        "utf-8"
+    )
+    await repo.upsert_rubric_template(
+        session,
+        method=method,
+        name="Парная регрессия — пилотная рубрика",
+        criteria_json=criteria_json,
+    )
+    return list(DEFAULT_OLS_SIMPLE_RUBRIC)
+
+
+async def grade_round_reasoning(
+    session: AsyncSession, round_id: int, llm: StructuredLLM
+) -> list[ResultRow]:
+    """Оценить обоснования всех решений закрытого раунда по рубрике.
+
+    Отдельная операция, НЕ часть close_round: вызов LLM сетевой и может
+    упасть, а рыночный результат от него зависеть не должен. Для каждого
+    Decision раунда вызывается существующий grade_submission; рыночные
+    цена/прибыль в Result сохраняются как были, обновляются только
+    rubric_score и rubric_breakdown_json (полный GradingResult для аудита).
+    Повторный запуск просто перезаписывает оценки — операция идемпотентна.
+
+    Returns
+    -------
+    list[ResultRow]
+        Обновлённый дамп результатов раунда.
+
+    Raises
+    ------
+    ValueError
+        Если раунд не существует, ещё не закрыт, не имеет решений или у
+        решения нет посчитанного Result (раунд закрыт в обход сервиса).
+    LLMError
+        Проброшено из клиента, если Groq недоступен или вернул мусор;
+        страница показывает это как ошибку, не роняя раунд.
+    """
+    round_ = await repo.get_round(session, round_id)
+    if round_ is None:
+        raise ValueError(f"round {round_id} not found")
+    if round_.status is not RoundStatus.CLOSED:
+        raise ValueError(
+            f"round {round_id} is {round_.status.value}; оценивать обоснования "
+            "можно только после закрытия раунда"
+        )
+    decisions = await repo.list_decisions_for_round(session, round_id)
+    if not decisions:
+        raise ValueError(f"round {round_id} has no decisions to grade")
+
+    rubric = await ensure_rubric_for_method(session, round_.method)
+
+    for decision in decisions:
+        assert decision.id is not None  # прочитан из БД
+        existing = await repo.get_result_for_decision(session, decision.id)
+        if existing is None:
+            raise ValueError(
+                f"decision {decision.id} has no market result — закройте "
+                "раунд через дашборд, чтобы результаты посчитались"
+            )
+        grading = await grade_submission(decision.reasoning, rubric, llm)
+        await repo.save_result(
+            session,
+            decision_id=decision.id,
+            price=existing.price,
+            profit=existing.profit,
+            rubric_score=grading.total_score,
+            rubric_breakdown_json=grading.model_dump_json(),
+        )
+
+    return await results_table(session, round_id)

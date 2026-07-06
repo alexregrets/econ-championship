@@ -21,8 +21,10 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 from dashboard.actions import (  # noqa: E402
     ResultRow,
+    build_grading_llm,
     close_round_with_results,
     create_and_open_round,
+    grade_round_reasoning,
     next_round_number,
     results_table,
     submit_manual_decision,
@@ -31,6 +33,7 @@ from dashboard.db_runner import run_db  # noqa: E402
 from db import repositories as repo  # noqa: E402
 from db.enums import RoundStatus  # noqa: E402
 from db.models import Round, Team  # noqa: E402
+from llm.base import LLMError  # noqa: E402
 
 
 def render_rounds_list(rounds: list[Round]) -> None:
@@ -119,6 +122,28 @@ def render_decision_stub(round_: Round, teams: list[Team]) -> None:
         st.rerun()
 
 
+def render_grade_button(round_: Round) -> None:
+    """Кнопка «Оценить обоснования»: LLM-грейдинг отдельно от рыночного счёта.
+
+    Не внутри close_round: Groq — сетевой вызов и может упасть; ошибка
+    показывается сообщением, рыночные результаты раунда не трогаются.
+    Таблица под кнопкой рисуется после обработчика, поэтому после успешной
+    оценки она сразу показывает новые rubric score без перезагрузки.
+    """
+    assert round_.id is not None
+    if st.button(
+        f"Оценить обоснования раунда №{round_.number} (Groq)",
+        key=f"grade_{round_.id}",
+    ):
+        try:
+            llm = build_grading_llm()
+            run_db(partial(grade_round_reasoning, round_id=round_.id, llm=llm))
+        except (ValueError, LLMError) as exc:
+            st.error(f"Оценка не выполнена: {exc}")
+        else:
+            st.success("Обоснования оценены — колонка rubric score обновлена.")
+
+
 def render_results(rows: list[ResultRow]) -> None:
     """Сырой дамп результатов: команда | market score | rubric score."""
     if not rows:
@@ -172,6 +197,7 @@ def main() -> None:
         for round_ in closed_rounds:
             assert round_.id is not None
             st.markdown(f"**Раунд №{round_.number}**")
+            render_grade_button(round_)
             render_results(run_db(partial(results_table, round_id=round_.id)))
 
 
