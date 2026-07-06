@@ -19,6 +19,7 @@ from config import settings
 # Import models for their side effect: registering tables on SQLModel.metadata
 # so that init_db() can create them. (Kept local-looking to avoid an unused warning.)
 from db import models as _models  # noqa: F401
+from db import role_models as _role_models  # noqa: F401
 
 __all__ = ["engine", "init_db", "drop_all", "get_session", "get_session_ctx"]
 
