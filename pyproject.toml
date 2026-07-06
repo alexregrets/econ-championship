@@ -8,6 +8,7 @@ dependencies = [
     "httpx>=0.28.1",
     "pydantic-settings>=2.14.2",
     "sqlmodel>=0.0.38",
+    "streamlit>=1.59.0",
     "textual>=8.2.7",
 ]
 
@@ -35,7 +36,7 @@ python_version = "3.12"
 strict = true
 
 [[tool.mypy.overrides]]
-module = ["textual.*"]
+module = ["textual.*", "streamlit.*"]
 ignore_missing_imports = true
 
 [tool.uv]
