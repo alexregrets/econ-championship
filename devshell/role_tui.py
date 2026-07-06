@@ -24,7 +24,7 @@ from core.market_engine import MarketParameters, nash_equilibrium
 from db import repositories as repo
 from db.enums import Role
 from db.session import get_session_ctx, init_db
-from devshell.role_seed import generate_role_views
+from devshell.role_seed import generate_role_views, reset_and_seed_oil_2013
 from devshell.role_session import (
     commit_lead_decision,
     enter_role,
@@ -32,7 +32,6 @@ from devshell.role_session import (
     submit_role_proposal,
     what_if_profit,
 )
-from devshell.seed import reset_and_seed
 
 try:
     from textual.app import App, ComposeResult
@@ -151,13 +150,14 @@ class RoleShellApp(App[None]):
     # -- actions ---------------------------------------------------------- #
 
     async def _action_seed_roles(self) -> None:
-        """Пересоздать базу, засеять команды/раунд и сгенерировать срезы."""
-        summary = await reset_and_seed()
+        """Пересоздать базу, засеять пилот «Нефть РФ 2013» и срезы ролей."""
+        summary = await reset_and_seed_oil_2013()
         async with get_session_ctx() as session:
             views = await generate_role_views(session, summary.round_id)
         self._write(
-            f"[green]Засеяно[/] {len(summary.team_ids)} команд, раунд "
-            f"id={summary.round_id}, ролевых срезов: {len(views)}."
+            f"[green]Засеян пилот «Нефть РФ 2013»[/]: {len(summary.team_ids)} "
+            f"реальные компании, раунд id={summary.round_id}, ролевых срезов: "
+            f"{len(views)}."
         )
 
     async def _action_status(self) -> None:
