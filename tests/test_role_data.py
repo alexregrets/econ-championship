@@ -32,6 +32,7 @@ from devshell.role_session import (
     what_if_profit,
 )
 from devshell.seed import seed
+from services.round_service import close_round
 
 PARAMS = MarketParameters(a=100.0, b=1.0, marginal_cost=10.0)
 
@@ -285,3 +286,54 @@ async def test_commit_lead_decision_creates_single_team_decision(
     assert len(decisions) == 1
     assert decisions[0].team_id == team_id
     assert decisions[0].quantity == 15.0
+
+
+async def test_full_role_round_integration(session: AsyncSession) -> None:
+    """Полный цикл: срезы → предложения → lead-решения → закрытие раунда.
+
+    Ролевой трек не меняет экономику: раунд, собранный из lead-решений,
+    закрывается существующим сервисом, и числа сходятся с ручным расчётом.
+    Все 7 команд играют одинаковый Q=10 → Q_total=70, P=30, прибыль 200.
+    """
+    summary = await seed(session)
+    await generate_role_views(session, summary.round_id)
+
+    for team_id in summary.team_ids:
+        # Две роли предлагают 8 и 12 → lead берёт равновзвешенный агрегат 10.
+        await submit_role_proposal(
+            session,
+            round_id=summary.round_id,
+            team_id=team_id,
+            role=Role.MARKETER,
+            quantity=8.0,
+        )
+        await submit_role_proposal(
+            session,
+            round_id=summary.round_id,
+            team_id=team_id,
+            role=Role.FINANCIER,
+            quantity=12.0,
+        )
+        overview = await lead_overview(
+            session, round_id=summary.round_id, team_id=team_id
+        )
+        assert overview.aggregated_quantity is not None
+        assert overview.aggregated_quantity == pytest.approx(10.0)
+        await commit_lead_decision(
+            session,
+            round_id=summary.round_id,
+            team_id=team_id,
+            quantity=overview.aggregated_quantity,
+            reasoning="lead: агрегат предложений",
+        )
+
+    results = await close_round(session, summary.round_id)
+    assert len(results) == 7
+    # P = 100 - 1*70 = 30; прибыль = (30-10)*10 = 200 у каждой команды.
+    for team_result in results.values():
+        assert team_result.price == pytest.approx(30.0)
+        assert team_result.profit == pytest.approx(200.0)
+
+    round_ = await repo.get_round(session, summary.round_id)
+    assert round_ is not None
+    assert round_.status is RoundStatus.CLOSED
