@@ -4,6 +4,7 @@ version = "0.1.0"
 description = "Econometrics Championship — Cournot tournament platform for econometrics education"
 requires-python = ">=3.12"
 dependencies = [
+    "aiogram>=3.29.1",
     "aiosqlite>=0.22.1",
     "httpx>=0.28.1",
     "pydantic-settings>=2.14.2",
