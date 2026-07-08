@@ -24,6 +24,7 @@ from pydantic import BaseModel
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from core.market_engine import MarketParameters
+from core.market_engine_asymmetric import implied_marginal_costs
 from db import repositories as repo
 from db import role_repositories as role_repo
 from db.enums import Method, Role, RoundStatus
@@ -43,6 +44,7 @@ __all__ = [
     "ROLE_COST_SHARES",
     "RoleSlice",
     "oil_2013_market_parameters",
+    "implied_oil_2013_costs",
     "build_role_slices",
     "seed_oil_2013",
     "reset_and_seed_oil_2013",
@@ -108,6 +110,27 @@ def oil_2013_market_parameters() -> MarketParameters:
     a = (n + 1) * price - n * cost
     b = (a - price) / TOTAL_PRODUCTION_2013_MLN_T
     return MarketParameters(a=a, b=b, marginal_cost=cost)
+
+
+def implied_oil_2013_costs() -> dict[str, float]:
+    """Неявные (calibrated) предельные издержки компаний из равновесия 2013, $/т.
+
+    Пофирменной полной себестоимости нужной точности в открытых источниках не
+    существует, поэтому числа берутся обратной калибровкой (DECISIONS.md №18):
+    при уже зафиксированных a и b (:func:`oil_2013_market_parameters`) из FOC
+    асимметричного Курно выводятся c_i, при которых равновесные q_i* совпадают
+    с фактической добычей 2013 года. Средняя по трём компаниям по построению
+    равна полной себестоимости $50/барр (364 $/т); индивидуальные значения —
+    модельные (implied), использовать их как факт отчётности нельзя.
+    """
+    params = oil_2013_market_parameters()
+    companies = list(OIL_PRODUCTION_2013_MLN_T)
+    costs = implied_marginal_costs(
+        params.a,
+        params.b,
+        [OIL_PRODUCTION_2013_MLN_T[company] for company in companies],
+    )
+    return dict(zip(companies, costs, strict=True))
 
 
 class _RoleNarratives(BaseModel):
