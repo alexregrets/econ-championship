@@ -27,7 +27,7 @@ from dashboard.actions import (
 )
 from db import models  # noqa: F401  (регистрирует таблицы)
 from db import repositories as repo
-from db.enums import Method, RoundStatus
+from db.enums import EngineMode, Method, RoundStatus
 from llm.base import LLMError
 
 
@@ -74,6 +74,24 @@ async def test_create_and_open_round_is_open_and_ols_simple(
     assert round_.status is RoundStatus.OPEN
     assert round_.method is Method.OLS_SIMPLE
     assert round_.market_a == 100.0
+    # Без явного engine_mode раунд симметричный — дефолт формы не сдвинут.
+    assert round_.engine_mode is EngineMode.SYMMETRIC
+
+
+async def test_create_and_open_round_asymmetric_mode_persists(
+    session: AsyncSession,
+) -> None:
+    round_ = await create_and_open_round(
+        session,
+        number=1,
+        difficulty=1,
+        market_a=100.0,
+        market_b=1.0,
+        market_mc=10.0,
+        case_narrative="асимметричный пилот",
+        engine_mode=EngineMode.ASYMMETRIC,
+    )
+    assert round_.engine_mode is EngineMode.ASYMMETRIC
 
 
 async def test_submit_manual_decision_creates_and_revises(

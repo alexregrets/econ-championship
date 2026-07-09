@@ -18,7 +18,7 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 from config import settings
 from core.rubric_grader import RubricCriterion, grade_submission
 from db import repositories as repo
-from db.enums import Method, RoundStatus
+from db.enums import EngineMode, Method, RoundStatus
 from db.models import Decision, Round
 from llm.base import StructuredLLM
 from llm.groq_client import GroqClient
@@ -117,6 +117,7 @@ async def create_and_open_round(
     market_b: float,
     market_mc: float,
     case_narrative: str,
+    engine_mode: EngineMode = EngineMode.SYMMETRIC,
 ) -> Round:
     """Создать раунд (черновик) и сразу открыть его для приёма решений.
 
@@ -124,6 +125,11 @@ async def create_and_open_round(
     («Нефть РФ 2013», парная регрессия). Создание идёт через существующий
     repo.create_round, открытие — через round_service.open_round, чтобы вся
     смена статусов проходила одним и тем же путём, что и в остальном коде.
+
+    ``engine_mode`` по умолчанию симметричный — поведение существующих
+    раундов не меняется. Асимметричный раунд считается по пофирменным
+    издержкам из CompanyGroundTruth (их пишет generate_role_views); без них
+    close_round честно откажется закрывать раунд.
     """
     round_ = await repo.create_round(
         session,
@@ -135,6 +141,7 @@ async def create_and_open_round(
         market_mc=market_mc,
         case_narrative=case_narrative,
         status=RoundStatus.DRAFT,
+        engine_mode=engine_mode,
     )
     assert round_.id is not None  # только что сохранён — id уже присвоен
     await open_round(session, round_.id)

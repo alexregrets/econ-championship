@@ -27,7 +27,7 @@ from core.market_engine import MarketParameters
 from core.market_engine_asymmetric import implied_marginal_costs
 from db import repositories as repo
 from db import role_repositories as role_repo
-from db.enums import Method, Role, RoundStatus
+from db.enums import EngineMode, Method, Role, RoundStatus
 from db.role_models import RoleDataView
 from db.session import drop_all, get_session_ctx, init_db
 from devshell.seed import SeedSummary
@@ -220,13 +220,20 @@ def build_role_slices(
 _ROLES = (Role.MARKETER, Role.SALES_ANALYST, Role.FINANCIER)
 
 
-async def seed_oil_2013(session: AsyncSession) -> SeedSummary:
+async def seed_oil_2013(
+    session: AsyncSession, *, engine_mode: EngineMode = EngineMode.SYMMETRIC
+) -> SeedSummary:
     """Засеять пилот ролевого трека: 3 реальные компании и открытый раунд.
 
     Команды — Роснефть, Лукойл и Сургутнефтегаз (по три студента в трёх
     ролях), раунд — «Нефть РФ 2013» с калиброванными параметрами рынка.
     Возвращает тот же :class:`~devshell.seed.SeedSummary`, что и обычный
     сидер, чтобы остальной dev-shell работал без изменений.
+
+    ``engine_mode`` — движок раунда; по умолчанию симметричный (поведение
+    прежних сессий не меняется). Для асимметричного раунда пофирменные
+    издержки пишет :func:`generate_role_views` — без него закрыть
+    асимметричный раунд нельзя.
     """
     params = oil_2013_market_parameters()
 
@@ -266,6 +273,7 @@ async def seed_oil_2013(session: AsyncSession) -> SeedSummary:
             "спрос парной регрессией и выберите объём добычи (млн т)."
         ),
         status=RoundStatus.OPEN,
+        engine_mode=engine_mode,
     )
     assert round_.id is not None
     return SeedSummary(
@@ -273,12 +281,14 @@ async def seed_oil_2013(session: AsyncSession) -> SeedSummary:
     )
 
 
-async def reset_and_seed_oil_2013() -> SeedSummary:
+async def reset_and_seed_oil_2013(
+    *, engine_mode: EngineMode = EngineMode.SYMMETRIC
+) -> SeedSummary:
     """Пересоздать схему и засеять пилот «Нефть РФ 2013» с нуля."""
     await drop_all()
     await init_db()
     async with get_session_ctx() as session:
-        return await seed_oil_2013(session)
+        return await seed_oil_2013(session, engine_mode=engine_mode)
 
 
 async def _narratives_via_llm(
@@ -370,6 +380,12 @@ async def generate_role_views(
             "тот же рынок"
         )
 
+    # Калиброванные пофирменные издержки (DECISIONS.md №18) пишутся в ground
+    # truth всегда: симметричный движок их не читает, а асимметричный раунд
+    # без них закрыть нельзя. Не пересчитываются — та же функция, что
+    # закреплена тестами на точность воспроизведения долей 2013 года.
+    implied_costs = implied_oil_2013_costs()
+
     created: list[RoleDataView] = []
     for team in teams:
         assert team.id is not None  # команды прочитаны из БД
@@ -392,6 +408,7 @@ async def generate_role_views(
             demand_a=params.a,
             demand_b=params.b,
             marginal_cost=params.marginal_cost,
+            implied_marginal_cost=implied_costs[team.company_name],
             ref_total_quantity=TOTAL_PRODUCTION_2013_MLN_T,
             observed_price=URALS_PRICE_2013_USD_PER_TON,
         )

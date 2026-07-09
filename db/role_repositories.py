@@ -16,6 +16,7 @@ __all__ = [
     # ground truth
     "create_ground_truth",
     "get_ground_truth",
+    "list_ground_truths_for_round",
     # role views
     "create_role_view",
     "get_role_view",
@@ -42,14 +43,21 @@ async def create_ground_truth(
     marginal_cost: float,
     ref_total_quantity: float,
     observed_price: float,
+    implied_marginal_cost: float | None = None,
 ) -> CompanyGroundTruth:
-    """Сохранить ground-truth агрегат компании за раунд."""
+    """Сохранить ground-truth агрегат компании за раунд.
+
+    ``implied_marginal_cost`` — калиброванные пофирменные издержки для
+    асимметричного движка; ``None`` (по умолчанию) — команда играет только
+    в симметричных раундах.
+    """
     truth = CompanyGroundTruth(
         round_id=round_id,
         team_id=team_id,
         demand_a=demand_a,
         demand_b=demand_b,
         marginal_cost=marginal_cost,
+        implied_marginal_cost=implied_marginal_cost,
         ref_total_quantity=ref_total_quantity,
         observed_price=observed_price,
     )
@@ -70,6 +78,20 @@ async def get_ground_truth(
         )
     )
     return result.first()
+
+
+async def list_ground_truths_for_round(
+    session: AsyncSession, round_id: int
+) -> list[CompanyGroundTruth]:
+    """Все ground-truth агрегаты раунда (по одному на команду).
+
+    Нужен асимметричному движку (пофирменные издержки на close_round)
+    и студенческой витрине (общие reference-поля рынка).
+    """
+    result = await session.exec(
+        select(CompanyGroundTruth).where(CompanyGroundTruth.round_id == round_id)
+    )
+    return list(result.all())
 
 
 # --------------------------------------------------------------------------- #

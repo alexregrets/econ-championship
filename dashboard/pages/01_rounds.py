@@ -31,9 +31,16 @@ from dashboard.actions import (  # noqa: E402
 )
 from dashboard.db_runner import run_db  # noqa: E402
 from db import repositories as repo  # noqa: E402
-from db.enums import RoundStatus  # noqa: E402
+from db.enums import EngineMode, RoundStatus  # noqa: E402
 from db.models import Round, Team  # noqa: E402
 from llm.base import LLMError  # noqa: E402
+
+# Подписи движков в форме и таблице: человекочитаемо, но однозначно мапится
+# обратно в EngineMode.
+_ENGINE_LABELS: dict[EngineMode, str] = {
+    EngineMode.SYMMETRIC: "симметричный (mc раунда для всех)",
+    EngineMode.ASYMMETRIC: "асимметричный (пофирменные издержки)",
+}
 
 
 def render_rounds_list(rounds: list[Round]) -> None:
@@ -53,6 +60,7 @@ def render_rounds_list(rounds: list[Round]) -> None:
                 "метод": r.method.value,
                 "сложность": r.difficulty,
                 "статус": r.status.value,
+                "движок": _ENGINE_LABELS[r.engine_mode],
                 "создан (UTC)": r.created_at.strftime("%Y-%m-%d %H:%M"),
             }
             for r in rounds
@@ -69,6 +77,15 @@ def render_create_form(suggested_number: int) -> None:
         market_a = st.number_input("a — точка насыщения спроса", min_value=0.1, value=100.0)
         market_b = st.number_input("b — наклон спроса", min_value=0.001, value=1.0)
         market_mc = st.number_input("mc — предельные издержки", min_value=0.0, value=10.0)
+        engine_label = st.selectbox(
+            "Движок",
+            [_ENGINE_LABELS[EngineMode.SYMMETRIC], _ENGINE_LABELS[EngineMode.ASYMMETRIC]],
+            help=(
+                "Асимметричный движок берёт пофирменные издержки из ground truth "
+                "команд (generate_role_views); mc раунда тогда не используется. "
+                "Без калиброванных издержек асимметричный раунд не закроется."
+            ),
+        )
         narrative = st.text_area(
             "Условие кейса",
             value="Нефть РФ 2013: оцените спрос парной регрессией и выберите объём добычи.",
@@ -78,6 +95,9 @@ def render_create_form(suggested_number: int) -> None:
         if market_mc >= market_a:
             st.error("mc должен быть строго меньше a — иначе рынок нежизнеспособен.")
             return
+        engine_mode = next(
+            mode for mode, label in _ENGINE_LABELS.items() if label == engine_label
+        )
         round_ = run_db(
             partial(
                 create_and_open_round,
@@ -87,6 +107,7 @@ def render_create_form(suggested_number: int) -> None:
                 market_b=float(market_b),
                 market_mc=float(market_mc),
                 case_narrative=narrative,
+                engine_mode=engine_mode,
             )
         )
         st.success(f"Раунд №{round_.number} создан и открыт (id={round_.id}).")

@@ -11,7 +11,7 @@ from __future__ import annotations
 from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
-from db.enums import Method, Role, RoundStatus
+from db.enums import EngineMode, Method, Role, RoundStatus
 from db.models import (
     Decision,
     Result,
@@ -162,8 +162,9 @@ async def create_round(
     market_mc: float,
     case_narrative: str = "",
     status: RoundStatus = RoundStatus.DRAFT,
+    engine_mode: EngineMode = EngineMode.SYMMETRIC,
 ) -> Round:
-    """Persist a new round (defaults to ``DRAFT``)."""
+    """Persist a new round (defaults to ``DRAFT``, symmetric engine)."""
     round_ = Round(
         number=number,
         method=method,
@@ -173,6 +174,7 @@ async def create_round(
         market_mc=market_mc,
         case_narrative=case_narrative,
         status=status,
+        engine_mode=engine_mode,
     )
     session.add(round_)
     await session.commit()

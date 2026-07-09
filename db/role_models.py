@@ -50,6 +50,11 @@ class CompanyGroundTruth(SQLModel, table=True):
     demand_a: float
     demand_b: float
     marginal_cost: float
+    # Калиброванные пофирменные издержки c_i (implied costs, DECISIONS.md №18)
+    # для асимметричного движка. None — у команды нет пофирменной калибровки,
+    # асимметричный раунд с ней закрыть нельзя; симметричный движок поле
+    # не читает вовсе.
+    implied_marginal_cost: float | None = None
     # Референсный суммарный выпуск отрасли — общий ориентир для всех ролей.
     ref_total_quantity: float
     # Наблюдаемая рыночная цена при референсном выпуске.
