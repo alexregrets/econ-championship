@@ -17,6 +17,7 @@ import sys
 from functools import partial
 from pathlib import Path
 
+import pandas as pd
 import streamlit as st
 
 # Streamlit кладёт в sys.path папку самого скрипта, а не корень проекта,
@@ -26,10 +27,14 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 from dashboard.actions import (  # noqa: E402
+    EquilibriumComparison,
     MarketBrief,
+    ScenarioDataset,
     TeamProgress,
+    equilibrium_comparison,
     latest_round,
     market_brief,
+    scenario_dataset,
     team_role_progress,
 )
 from dashboard.db_runner import run_db  # noqa: E402
@@ -100,6 +105,91 @@ def render_team_progress(progress: TeamProgress) -> None:
     )
 
 
+def render_scenario_dataset(dataset: ScenarioDataset | None) -> None:
+    """Превью сырых данных сценария: увидеть данные глазами до регрессии.
+
+    Три bar chart по компаниям: добыча, выручка, издержки. Издержки —
+    среднеотраслевая планка, одинаковая у всех: пофирменные (implied) издержки
+    скрыты намеренно (DECISIONS.md №23), это часть игры. Временных рядов в
+    RoleDataView нет (сигнал роли — одно число), поэтому line chart не рисуем.
+    """
+    if dataset is None:
+        return
+    st.divider()
+    st.subheader("Данные сценария — посмотрите глазами, прежде чем считать")
+
+    companies = list(dataset.productions)
+    st.markdown("**Добыча за 2013 год, млн т** (ЦДУ ТЭК)")
+    st.bar_chart(
+        pd.DataFrame(
+            {"добыча, млн т": [dataset.productions[c] for c in companies]},
+            index=companies,
+        )
+    )
+    st.markdown(
+        f"**Выручка при цене Urals {dataset.observed_price_per_ton:.0f} $/т, млн $**"
+    )
+    st.bar_chart(
+        pd.DataFrame(
+            {"выручка, млн $": [dataset.revenues[c] for c in companies]},
+            index=companies,
+        )
+    )
+    st.markdown("**Полная себестоимость, $/т — среднеотраслевая оценка**")
+    st.bar_chart(
+        pd.DataFrame(
+            {
+                "себестоимость, $/т": [dataset.industry_cost_per_ton] * len(companies)
+            },
+            index=companies,
+        )
+    )
+    st.caption(
+        "Себестоимость показана среднеотраслевой ($50/барр с НДПИ и "
+        "капзатратами). Издержки конкретной фирмы могут отличаться — "
+        "думайте, чья и насколько."
+    )
+
+
+def render_equilibrium(comparison: EquilibriumComparison | None) -> None:
+    """После закрытия раунда: «где мы оказались относительно равновесия»."""
+    if comparison is None:
+        return
+    st.divider()
+    st.subheader("Итог раунда против равновесия Нэша")
+
+    col_q, col_p = st.columns(2)
+    with col_q:
+        st.markdown("**Суммарный выпуск Q**")
+        st.bar_chart(
+            pd.DataFrame(
+                {"Q": [comparison.actual_total_quantity,
+                       comparison.equilibrium_total_quantity]},
+                index=["факт", "равновесие"],
+            )
+        )
+    with col_p:
+        st.markdown("**Рыночная цена P**")
+        st.bar_chart(
+            pd.DataFrame(
+                {"P": [comparison.actual_price, comparison.equilibrium_price]},
+                index=["факт", "равновесие"],
+            )
+        )
+
+    st.markdown("**Выпуск по командам: факт против равновесного q\\***")
+    st.bar_chart(
+        pd.DataFrame(
+            {
+                "факт": [t.actual_quantity for t in comparison.teams],
+                "равновесие": [t.equilibrium_quantity for t in comparison.teams],
+            },
+            index=[t.team_label for t in comparison.teams],
+        ),
+        stack=False,
+    )
+
+
 def render_how_to_submit() -> None:
     """Инструкция подачи решения — только через Telegram-бота."""
     st.divider()
@@ -131,6 +221,8 @@ def main() -> None:
     render_round_header(round_)
     assert round_.id is not None
     render_market_brief(run_db(partial(market_brief, round_id=round_.id)))
+    render_scenario_dataset(run_db(partial(scenario_dataset, round_id=round_.id)))
+    render_equilibrium(run_db(partial(equilibrium_comparison, round_id=round_.id)))
 
     st.divider()
     st.subheader("Прогресс команды")

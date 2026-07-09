@@ -46,6 +46,14 @@ __all__ = [
     "market_brief",
     "team_role_progress",
     "teacher_summary",
+    # визуализация (read-only): превью датасета, равновесие, история
+    "ScenarioDataset",
+    "TeamQuantityRow",
+    "EquilibriumComparison",
+    "RoundHistoryRow",
+    "scenario_dataset",
+    "equilibrium_comparison",
+    "rounds_history",
 ]
 
 # Пилотная рубрика для парной регрессии: используется, если профессор ещё не
@@ -387,6 +395,220 @@ async def teacher_summary(session: AsyncSession) -> TeacherSummary:
         open_round_number=open_round_number,
         decisions_submitted=decisions_submitted,
     )
+
+
+# --------------------------------------------------------------------------- #
+# Визуализация (read-only): превью датасета, «где мы против равновесия»,
+# история раундов. Новых таблиц нет — всё читается из уже посчитанного.
+# --------------------------------------------------------------------------- #
+
+
+@dataclass(frozen=True)
+class ScenarioDataset:
+    """Сырые данные сценария «Нефть РФ 2013» для превью перед решением.
+
+    Только публичная часть кейса (реальная добыча, цена Urals, среднеотраслевая
+    себестоимость) — приватные сигналы ролей и implied-издержки сюда не
+    попадают, спойлерить асимметричное равновесие нельзя.
+    """
+
+    productions: dict[str, float]  # компания -> добыча 2013, млн т
+    revenues: dict[str, float]  # компания -> выручка, млн $ (добыча × цена)
+    industry_cost_per_ton: float  # среднеотраслевая полная себестоимость, $/т
+    observed_price_per_ton: float  # цена Urals 2013, $/т
+
+
+@dataclass(frozen=True)
+class TeamQuantityRow:
+    """Q команды в закрытом раунде против её равновесного q*."""
+
+    team_label: str
+    actual_quantity: float
+    equilibrium_quantity: float
+
+
+@dataclass(frozen=True)
+class EquilibriumComparison:
+    """Итог закрытого раунда против расчётного равновесия Нэша.
+
+    Референс зависит от движка раунда: симметричный Нэш по параметрам
+    раунда или асимметричное равновесие по implied-издержкам команд.
+    """
+
+    engine_mode: EngineMode
+    actual_price: float
+    equilibrium_price: float
+    actual_total_quantity: float
+    equilibrium_total_quantity: float
+    teams: list[TeamQuantityRow]
+
+
+@dataclass(frozen=True)
+class RoundHistoryRow:
+    """Одна строка истории турнира: закрытый раунд и его рыночный итог."""
+
+    number: int
+    engine_mode: EngineMode
+    price: float
+    total_quantity: float
+    avg_profit: float
+    decisions: int
+
+
+async def scenario_dataset(
+    session: AsyncSession, round_id: int
+) -> ScenarioDataset | None:
+    """Публичные сырые данные сценария для превью, если раунд — «Нефть РФ 2013».
+
+    Сценарий распознаётся по командам: у каждой должна быть компания из
+    реального датасета добычи (иначе это generic-раунд без превью — ``None``).
+    Числа берутся из констант сценария (devshell.role_seed) — это и есть
+    датасет для регрессии; в БД пофирменной добычи нет.
+    """
+    from devshell.role_seed import (
+        FULL_COST_2013_USD_PER_TON,
+        OIL_PRODUCTION_2013_MLN_T,
+        URALS_PRICE_2013_USD_PER_TON,
+    )
+
+    round_ = await repo.get_round(session, round_id)
+    if round_ is None:
+        return None
+    teams = await repo.list_teams(session)
+    if not teams or any(
+        t.company_name not in OIL_PRODUCTION_2013_MLN_T for t in teams
+    ):
+        return None
+
+    return ScenarioDataset(
+        productions=dict(OIL_PRODUCTION_2013_MLN_T),
+        revenues={
+            company: production * URALS_PRICE_2013_USD_PER_TON
+            for company, production in OIL_PRODUCTION_2013_MLN_T.items()
+        },
+        industry_cost_per_ton=FULL_COST_2013_USD_PER_TON,
+        observed_price_per_ton=URALS_PRICE_2013_USD_PER_TON,
+    )
+
+
+async def equilibrium_comparison(
+    session: AsyncSession, round_id: int
+) -> EquilibriumComparison | None:
+    """Итог закрытого раунда против равновесия Нэша — «где мы оказались».
+
+    ``None``, если раунд не закрыт, решений нет или (для асимметричного
+    раунда) у какой-то решившей команды нет калиброванных издержек —
+    страница тогда просто не рисует блок, не падает.
+
+    Движки вызываются как чистые функции только для расчёта референса;
+    ничего не пишется.
+    """
+    from core.market_engine import MarketParameters, nash_equilibrium
+    from core.market_engine_asymmetric import asymmetric_nash_equilibrium
+
+    round_ = await repo.get_round(session, round_id)
+    if round_ is None or round_.status is not RoundStatus.CLOSED:
+        return None
+    decisions = await repo.list_decisions_for_round(session, round_id)
+    if not decisions:
+        return None
+
+    # Фактическая цена — из любого Result (она общая); нет Result — раунд
+    # закрыт в обход сервиса, сравнивать нечего.
+    assert decisions[0].id is not None
+    first_result = await repo.get_result_for_decision(session, decisions[0].id)
+    if first_result is None:
+        return None
+    actual_total = sum(d.quantity for d in decisions)
+
+    team_labels: dict[int, str] = {}
+    for decision in decisions:
+        team = await repo.get_team(session, decision.team_id)
+        team_labels[decision.team_id] = (
+            f"{team.name} ({team.company_name})"
+            if team is not None
+            else f"team {decision.team_id}"
+        )
+
+    if round_.engine_mode is EngineMode.ASYMMETRIC:
+        truths = await role_repo.list_ground_truths_for_round(session, round_id)
+        costs_by_team = {
+            t.team_id: t.implied_marginal_cost
+            for t in truths
+            if t.implied_marginal_cost is not None
+        }
+        if any(d.team_id not in costs_by_team for d in decisions):
+            return None
+        result = asymmetric_nash_equilibrium(
+            round_.market_a,
+            round_.market_b,
+            [costs_by_team[d.team_id] for d in decisions],
+        )
+        eq_quantities = dict(
+            zip((d.team_id for d in decisions), result.quantities, strict=True)
+        )
+        eq_price = result.price
+        eq_total = result.total_quantity
+    else:
+        params = MarketParameters(
+            a=round_.market_a, b=round_.market_b, marginal_cost=round_.market_mc
+        )
+        symmetric_q = nash_equilibrium(len(decisions), params)
+        eq_quantities = {d.team_id: symmetric_q for d in decisions}
+        eq_total = symmetric_q * len(decisions)
+        eq_price = round_.market_a - round_.market_b * eq_total
+
+    return EquilibriumComparison(
+        engine_mode=round_.engine_mode,
+        actual_price=first_result.price,
+        equilibrium_price=eq_price,
+        actual_total_quantity=actual_total,
+        equilibrium_total_quantity=eq_total,
+        teams=[
+            TeamQuantityRow(
+                team_label=team_labels[d.team_id],
+                actual_quantity=d.quantity,
+                equilibrium_quantity=eq_quantities[d.team_id],
+            )
+            for d in decisions
+        ],
+    )
+
+
+async def rounds_history(session: AsyncSession) -> list[RoundHistoryRow]:
+    """История закрытых раундов турнира по номерам — для графика препода.
+
+    Отдельного поля «сценарий» у Round нет — историей считаются все закрытые
+    раунды с посчитанными результатами (текущий турнир и есть один сценарий).
+    Один сыгранный раунд = одна точка; это ожидаемо, фейковых точек не рисуем.
+    """
+    rows: list[RoundHistoryRow] = []
+    for round_ in await repo.list_rounds(session):
+        if round_.status is not RoundStatus.CLOSED or round_.id is None:
+            continue
+        decisions = await repo.list_decisions_for_round(session, round_.id)
+        profits: list[float] = []
+        price: float | None = None
+        for decision in decisions:
+            assert decision.id is not None
+            result = await repo.get_result_for_decision(session, decision.id)
+            if result is None:
+                continue
+            profits.append(result.profit)
+            price = result.price
+        if price is None:
+            continue  # закрыт без результатов — на график не попадает
+        rows.append(
+            RoundHistoryRow(
+                number=round_.number,
+                engine_mode=round_.engine_mode,
+                price=price,
+                total_quantity=sum(d.quantity for d in decisions),
+                avg_profit=sum(profits) / len(profits),
+                decisions=len(decisions),
+            )
+        )
+    return rows
 
 
 def build_grading_llm() -> StructuredLLM:

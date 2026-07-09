@@ -11,6 +11,7 @@ import sys
 from functools import partial
 from pathlib import Path
 
+import pandas as pd
 import streamlit as st
 
 # Streamlit кладёт в sys.path папку самого скрипта, а не корень проекта,
@@ -21,6 +22,7 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 from dashboard.actions import (  # noqa: E402
     ResultRow,
+    RoundHistoryRow,
     TeacherSummary,
     build_grading_llm,
     close_round_with_results,
@@ -28,6 +30,7 @@ from dashboard.actions import (  # noqa: E402
     grade_round_reasoning,
     next_round_number,
     results_table,
+    rounds_history,
     submit_manual_decision,
     teacher_summary,
 )
@@ -202,6 +205,67 @@ def render_results(rows: list[ResultRow]) -> None:
     )
 
 
+def render_result_charts(rows: list[ResultRow], round_number: int) -> None:
+    """Два bar chart по командам: market score и rubric score.
+
+    Оси разные (прибыль в млн $ и доля 0..1) — в один график их не смешиваем,
+    как договорено ранее (единый score вне скоупа).
+    """
+    if not rows:
+        return
+    labels = [f"{r.team_name} ({r.company_name})" for r in rows]
+    col_market, col_rubric = st.columns(2)
+    with col_market:
+        st.markdown(f"**Раунд №{round_number}: market score (прибыль)**")
+        st.bar_chart(
+            pd.DataFrame({"прибыль": [r.market_score for r in rows]}, index=labels)
+        )
+    with col_rubric:
+        st.markdown(f"**Раунд №{round_number}: rubric score (0–1)**")
+        st.bar_chart(
+            pd.DataFrame({"rubric": [r.rubric_score for r in rows]}, index=labels)
+        )
+
+
+def render_history(history: list[RoundHistoryRow]) -> None:
+    """История закрытых раундов: таблица + графики цены и средней прибыли.
+
+    На одном сыгранном раунде это одна точка — так и должно быть,
+    фейковые точки не дорисовываем.
+    """
+    if not history:
+        return
+    st.divider()
+    st.subheader("История раундов")
+    st.table(
+        [
+            {
+                "№": h.number,
+                "движок": _ENGINE_LABELS[h.engine_mode],
+                "цена": round(h.price, 2),
+                "суммарный Q": round(h.total_quantity, 2),
+                "средняя прибыль": round(h.avg_profit, 2),
+                "решений": h.decisions,
+            }
+            for h in history
+        ]
+    )
+    frame = pd.DataFrame(
+        {
+            "цена": [h.price for h in history],
+            "средняя прибыль": [h.avg_profit for h in history],
+        },
+        index=[h.number for h in history],
+    )
+    col_price, col_profit = st.columns(2)
+    with col_price:
+        st.markdown("**Цена по раундам**")
+        st.line_chart(frame[["цена"]])
+    with col_profit:
+        st.markdown("**Средняя прибыль по раундам**")
+        st.line_chart(frame[["средняя прибыль"]])
+
+
 def main() -> None:
     """Собрать страницу: список раундов, форма создания, работа с открытым раундом."""
     st.set_page_config(page_title="Раунды", page_icon="🏁")
@@ -238,7 +302,11 @@ def main() -> None:
             assert round_.id is not None
             st.markdown(f"**Раунд №{round_.number}**")
             render_grade_button(round_)
-            render_results(run_db(partial(results_table, round_id=round_.id)))
+            rows = run_db(partial(results_table, round_id=round_.id))
+            render_results(rows)
+            render_result_charts(rows, round_.number)
+
+    render_history(run_db(rounds_history))
 
 
 main()
