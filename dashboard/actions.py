@@ -1,8 +1,9 @@
-"""Действия страницы раундов: тонкие обёртки над репозиториями и round_service.
+"""Действия страниц дашборда: тонкие обёртки над репозиториями и round_service.
 
-Логика вынесена из Streamlit-страницы сюда, чтобы её можно было тестировать
+Логика вынесена из Streamlit-страниц сюда, чтобы её можно было тестировать
 как обычные асинхронные функции (тем же стилем, что tests/test_round_service.py):
-функции принимают AsyncSession и не знают ничего про UI.
+функции принимают AsyncSession и не знают ничего про UI. Этим же слоем
+пользуется Telegram-бот (/submit) — валидация живёт в одном месте.
 
 Экономика здесь не считается: рынок считает services.round_service поверх
 core.market_engine, мы только собираем данные для отображения.
@@ -18,7 +19,8 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 from config import settings
 from core.rubric_grader import RubricCriterion, grade_submission
 from db import repositories as repo
-from db.enums import EngineMode, Method, RoundStatus
+from db import role_repositories as role_repo
+from db.enums import EngineMode, Method, Role, RoundStatus
 from db.models import Decision, Round
 from llm.base import StructuredLLM
 from llm.groq_client import GroqClient
@@ -35,6 +37,15 @@ __all__ = [
     "ensure_rubric_for_method",
     "grade_round_reasoning",
     "build_grading_llm",
+    # студенческая витрина (read-only) и сводка препода
+    "MarketBrief",
+    "RoleProgressRow",
+    "TeamProgress",
+    "TeacherSummary",
+    "latest_round",
+    "market_brief",
+    "team_role_progress",
+    "teacher_summary",
 ]
 
 # Пилотная рубрика для парной регрессии: используется, если профессор ещё не
@@ -232,6 +243,150 @@ async def results_table(session: AsyncSession, round_id: int) -> list[ResultRow]
     # Сортировка по прибыли — победители сверху, как на лидерборде.
     rows.sort(key=lambda r: r.market_score, reverse=True)
     return rows
+
+
+# --------------------------------------------------------------------------- #
+# Студенческая витрина (read-only) и сводка препода
+# --------------------------------------------------------------------------- #
+
+# Порядок ролей на витрине — тот же, что в сидерах.
+_VIEW_ROLES = (Role.MARKETER, Role.SALES_ANALYST, Role.FINANCIER)
+
+
+@dataclass(frozen=True)
+class MarketBrief:
+    """Общая (не приватная) рыночная картина раунда из ground truth.
+
+    Оба поля — shared buffer ролевых срезов: одинаковы у всех ролей и команд,
+    поэтому их можно показывать публично, не спойлеря приватные сигналы.
+    """
+
+    ref_total_quantity: float
+    observed_price: float
+
+
+@dataclass(frozen=True)
+class RoleProgressRow:
+    """Статус одной роли команды: подала ли предложение и (после фиксации
+    lead'ом) само предложение. До фиксации числа скрыты — не спойлерим."""
+
+    role: Role
+    submitted: bool
+    quantity: float | None
+    note: str | None
+
+
+@dataclass(frozen=True)
+class TeamProgress:
+    """Прогресс команды в раунде для витрины."""
+
+    lead_locked: bool  # финальное Decision уже подано lead'ом
+    roles: list[RoleProgressRow]
+
+
+@dataclass(frozen=True)
+class TeacherSummary:
+    """Короткая сводка для страницы препода: явка и активность."""
+
+    teams_total: int
+    teams_joined: int  # команд с хотя бы одним привязанным студентом
+    students_joined: int  # студентов с заполненным team_id
+    open_round_number: int | None  # None — открытого раунда нет
+    decisions_submitted: int  # решений в открытом раунде (0, если его нет)
+
+
+async def latest_round(session: AsyncSession) -> Round | None:
+    """Раунд для витрины: открытый, иначе последний по номеру, иначе None."""
+    open_round_ = await repo.get_open_round(session)
+    if open_round_ is not None:
+        return open_round_
+    rounds = await repo.list_rounds(session)
+    return rounds[-1] if rounds else None
+
+
+async def market_brief(session: AsyncSession, round_id: int) -> MarketBrief | None:
+    """Общая рыночная картина раунда, если ролевые срезы сгенерированы.
+
+    Берётся из первого ground truth раунда: reference-поля одинаковы у всех
+    команд по инварианту генератора срезов. ``None`` — срезы не генерировались
+    (обычный симметричный раунд без ролевого трека), витрина покажет только
+    нарратив раунда.
+    """
+    truths = await role_repo.list_ground_truths_for_round(session, round_id)
+    if not truths:
+        return None
+    return MarketBrief(
+        ref_total_quantity=truths[0].ref_total_quantity,
+        observed_price=truths[0].observed_price,
+    )
+
+
+async def team_role_progress(
+    session: AsyncSession, *, round_id: int, team_id: int
+) -> TeamProgress:
+    """Кто из ролей команды уже подал предложение (RoleInput) в раунде.
+
+    Числа предложений раскрываются только после фиксации решения lead'ом
+    (существует Decision команды за раунд) — до этого витрина показывает
+    лишь факт подачи, чтобы не спойлерить обсуждение внутри команды.
+    """
+    decision = await repo.get_decision(session, team_id=team_id, round_id=round_id)
+    lead_locked = decision is not None
+    inputs = await role_repo.list_role_inputs_for_team(
+        session, round_id=round_id, team_id=team_id
+    )
+    by_role = {i.role: i for i in inputs}
+
+    rows: list[RoleProgressRow] = []
+    for role in _VIEW_ROLES:
+        role_input = by_role.get(role)
+        if role_input is not None and lead_locked:
+            quantity: float | None = role_input.quantity_proposal
+            note: str | None = role_input.note or None
+        else:
+            quantity = None
+            note = None
+        rows.append(
+            RoleProgressRow(
+                role=role,
+                submitted=role_input is not None,
+                quantity=quantity,
+                note=note,
+            )
+        )
+    return TeamProgress(lead_locked=lead_locked, roles=rows)
+
+
+async def teacher_summary(session: AsyncSession) -> TeacherSummary:
+    """Сводка для препода: сколько команд/студентов зашло и подало решения.
+
+    «Зашли» = у студента заполнен team_id (бот делает это в /join; студенты
+    из dev-сидеров тоже считаются — различить их по данным нельзя, да и не
+    нужно: сводка отвечает на вопрос «кто уже в игре»). Читает только
+    существующие repository-функции.
+    """
+    teams = await repo.list_teams(session)
+    students = await repo.list_students(session)
+    joined = [s for s in students if s.team_id is not None]
+    joined_team_ids = {s.team_id for s in joined}
+
+    open_round_ = await repo.get_open_round(session)
+    decisions_submitted = 0
+    open_round_number: int | None = None
+    if open_round_ is not None:
+        assert open_round_.id is not None  # прочитан из БД
+        open_round_number = open_round_.number
+        decisions_submitted = len(
+            await repo.list_decisions_for_round(session, open_round_.id)
+        )
+
+    return TeacherSummary(
+        teams_total=len(teams),
+        teams_joined=len(joined_team_ids),
+        students_joined=len(joined),
+        open_round_number=open_round_number,
+        decisions_submitted=decisions_submitted,
+    )
 
 
 def build_grading_llm() -> StructuredLLM:

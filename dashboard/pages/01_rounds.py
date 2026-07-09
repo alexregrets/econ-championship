@@ -21,6 +21,7 @@ if str(_PROJECT_ROOT) not in sys.path:
 
 from dashboard.actions import (  # noqa: E402
     ResultRow,
+    TeacherSummary,
     build_grading_llm,
     close_round_with_results,
     create_and_open_round,
@@ -28,6 +29,7 @@ from dashboard.actions import (  # noqa: E402
     next_round_number,
     results_table,
     submit_manual_decision,
+    teacher_summary,
 )
 from dashboard.db_runner import run_db  # noqa: E402
 from db import repositories as repo  # noqa: E402
@@ -41,6 +43,22 @@ _ENGINE_LABELS: dict[EngineMode, str] = {
     EngineMode.SYMMETRIC: "симметричный (mc раунда для всех)",
     EngineMode.ASYMMETRIC: "асимметричный (пофирменные издержки)",
 }
+
+
+def render_teacher_summary(summary: TeacherSummary) -> None:
+    """Короткая сводка явки: кто зашёл через бота и кто уже подал решение."""
+    col_teams, col_students, col_decisions = st.columns(3)
+    col_teams.metric(
+        "Команд в игре", f"{summary.teams_joined} из {summary.teams_total}"
+    )
+    col_students.metric("Студентов привязано", summary.students_joined)
+    if summary.open_round_number is not None:
+        col_decisions.metric(
+            f"Решений в раунде №{summary.open_round_number}",
+            f"{summary.decisions_submitted} из {summary.teams_total}",
+        )
+    else:
+        col_decisions.metric("Решений в открытом раунде", "нет открытого")
 
 
 def render_rounds_list(rounds: list[Round]) -> None:
@@ -192,6 +210,7 @@ def main() -> None:
     rounds = run_db(repo.list_rounds)
     teams = run_db(repo.list_teams)
 
+    render_teacher_summary(run_db(teacher_summary))
     render_rounds_list(rounds)
     render_create_form(run_db(next_round_number))
 

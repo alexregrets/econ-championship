@@ -26,6 +26,7 @@ __all__ = [
     "create_student",
     "get_student_by_telegram_id",
     "assign_student_to_team",
+    "list_students",
     # teams
     "create_team",
     "get_team",
@@ -95,6 +96,12 @@ async def assign_student_to_team(
     await session.commit()
     await session.refresh(student)
     return student
+
+
+async def list_students(session: AsyncSession) -> list[Student]:
+    """Return all registered students (joined and not-yet-joined alike)."""
+    result = await session.exec(select(Student))
+    return list(result.all())
 
 
 # --------------------------------------------------------------------------- #
