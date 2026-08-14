@@ -7,6 +7,9 @@ dependencies = [
     "aiogram>=3.29.1",
     "aiosqlite>=0.22.1",
     "httpx>=0.28.1",
+    # Выгрузка датасета в XLSX. Лёгкий (~250 КБ), в отличие от научного
+    # стека, поэтому единственный, кто уезжает в runtime ради экспорта.
+    "openpyxl>=3.1",
     "pydantic-settings>=2.14.2",
     "sqlmodel>=0.0.38",
     "streamlit>=1.59.0",
@@ -27,6 +30,9 @@ dev = [
     "mypy>=1.11",
     "numpy>=2.0",
     "statsmodels>=0.14",
+    # Стабы, а не override в [tool.mypy]: экспорт студентам — место, где
+    # опечатка в имени листа обнаружится на турнире, а не в проверке типов.
+    "types-openpyxl>=3.1",
 ]
 
 [tool.pytest.ini_options]
