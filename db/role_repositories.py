@@ -10,7 +10,7 @@ from sqlmodel import select
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from db.enums import Role
-from db.role_models import CompanyGroundTruth, RoleDataView, RoleInput
+from db.role_models import CompanyGroundTruth, RoleDataView, RoleInput, RoleScore
 
 __all__ = [
     # ground truth
@@ -25,6 +25,11 @@ __all__ = [
     "upsert_role_input",
     "get_role_input",
     "list_role_inputs_for_team",
+    "list_role_inputs_for_round",
+    # role scores (личные KPI)
+    "upsert_role_score",
+    "list_role_scores_for_round",
+    "list_role_scores_for_team",
 ]
 
 
@@ -170,11 +175,15 @@ async def upsert_role_input(
     role: Role,
     quantity_proposal: float,
     note: str = "",
+    price_forecast: float | None = None,
 ) -> RoleInput:
     """Записать (или заменить) предложение роли за раунд.
 
     Роль может передумать, пока раунд открыт, — одна строка на
     (round, team, role), как у Decision на (team, round).
+
+    ``price_forecast`` — прогноз цены аналитика сбыта, вход его личного KPI
+    (:mod:`core.role_kpi`); у остальных ролей остаётся ``None``.
     """
     existing = await get_role_input(
         session, round_id=round_id, team_id=team_id, role=role
@@ -182,6 +191,7 @@ async def upsert_role_input(
     if existing is not None:
         existing.quantity_proposal = quantity_proposal
         existing.note = note
+        existing.price_forecast = price_forecast
         session.add(existing)
         await session.commit()
         await session.refresh(existing)
@@ -193,6 +203,7 @@ async def upsert_role_input(
         role=role,
         quantity_proposal=quantity_proposal,
         note=note,
+        price_forecast=price_forecast,
     )
     session.add(role_input)
     await session.commit()
@@ -222,6 +233,103 @@ async def list_role_inputs_for_team(
         select(RoleInput).where(
             RoleInput.round_id == round_id,
             RoleInput.team_id == team_id,
+        )
+    )
+    return list(result.all())
+
+
+async def list_role_inputs_for_round(
+    session: AsyncSession, round_id: int
+) -> list[RoleInput]:
+    """Все вводы ролей всех команд за раунд.
+
+    Нужен расчёту KPI при закрытии раунда: оттуда берутся прогнозы цены
+    аналитиков сбыта.
+    """
+    result = await session.exec(
+        select(RoleInput).where(RoleInput.round_id == round_id)
+    )
+    return list(result.all())
+
+
+# --------------------------------------------------------------------------- #
+# Role scores (личные KPI)
+# --------------------------------------------------------------------------- #
+
+
+async def upsert_role_score(
+    session: AsyncSession,
+    *,
+    round_id: int,
+    team_id: int,
+    role: Role,
+    kpi_raw: float,
+    kpi_name: str,
+    kpi_normalized: float,
+    team_component: float,
+    total: float,
+    has_input: bool = True,
+) -> RoleScore:
+    """Записать (или пересчитать) личную оценку роли за раунд.
+
+    Upsert, а не insert: раунд можно пересчитать (например, после исправления
+    события), и оценки должны обновиться, а не задвоиться.
+    """
+    result = await session.exec(
+        select(RoleScore).where(
+            RoleScore.round_id == round_id,
+            RoleScore.team_id == team_id,
+            RoleScore.role == role,
+        )
+    )
+    existing = result.first()
+    if existing is not None:
+        existing.kpi_raw = kpi_raw
+        existing.kpi_name = kpi_name
+        existing.kpi_normalized = kpi_normalized
+        existing.team_component = team_component
+        existing.total = total
+        existing.has_input = has_input
+        session.add(existing)
+        await session.commit()
+        await session.refresh(existing)
+        return existing
+
+    score = RoleScore(
+        round_id=round_id,
+        team_id=team_id,
+        role=role,
+        kpi_raw=kpi_raw,
+        kpi_name=kpi_name,
+        kpi_normalized=kpi_normalized,
+        team_component=team_component,
+        total=total,
+        has_input=has_input,
+    )
+    session.add(score)
+    await session.commit()
+    await session.refresh(score)
+    return score
+
+
+async def list_role_scores_for_round(
+    session: AsyncSession, round_id: int
+) -> list[RoleScore]:
+    """Все личные оценки раунда — сводка препода и графики разбора."""
+    result = await session.exec(
+        select(RoleScore).where(RoleScore.round_id == round_id)
+    )
+    return list(result.all())
+
+
+async def list_role_scores_for_team(
+    session: AsyncSession, *, round_id: int, team_id: int
+) -> list[RoleScore]:
+    """Оценки трёх ролей одной команды за раунд."""
+    result = await session.exec(
+        select(RoleScore).where(
+            RoleScore.round_id == round_id,
+            RoleScore.team_id == team_id,
         )
     )
     return list(result.all())

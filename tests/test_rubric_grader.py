@@ -7,8 +7,6 @@ are returned in rubric order.
 
 from __future__ import annotations
 
-from typing import cast
-
 from pydantic import BaseModel
 
 from core.rubric_grader import (
@@ -27,19 +25,17 @@ class FakeLLM:
         self._response = response
         self.calls: list[tuple[str, str]] = []
 
-    async def structured_completion[T: BaseModel](
+    async def structured_completion(
         self,
         system_prompt: str,
         user_prompt: str,
-        response_model: type[T],
+        response_model: type[BaseModel],
         *,
         temperature: float = 0.1,
         max_retries: int = 3,
-    ) -> T:
+    ) -> BaseModel:
         self.calls.append((system_prompt, user_prompt))
-        # Тестовый фейк всегда отдаёт заранее заданный LLMGradingResponse;
-        # cast сообщает mypy, что это и есть запрошенный response_model.
-        return cast("T", self._response)
+        return self._response
 
 
 def _rubric() -> list[RubricCriterion]:

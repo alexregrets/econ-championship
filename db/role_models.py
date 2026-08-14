@@ -11,6 +11,8 @@
 ``RoleInput``          — ввод конкретной роли (Q-предложение + заметка),
     хранится отдельно для аудита; в движок по-прежнему идёт одно Decision
     на команду от lead-роли.
+``RoleScore``          — личный KPI роли за раунд и итог студента
+    (см. :mod:`core.role_kpi`), считается при закрытии раунда.
 
 Существующие таблицы из :mod:`db.models` не меняются.
 """
@@ -23,7 +25,7 @@ from sqlmodel import Field, SQLModel, UniqueConstraint
 
 from db.enums import Role
 
-__all__ = ["CompanyGroundTruth", "RoleDataView", "RoleInput"]
+__all__ = ["CompanyGroundTruth", "RoleDataView", "RoleInput", "RoleScore"]
 
 
 def _utcnow() -> datetime:
@@ -111,4 +113,41 @@ class RoleInput(SQLModel, table=True):
     role: Role
     quantity_proposal: float
     note: str = ""
+    # Прогноз рыночной цены — вход KPI аналитика сбыта (core.role_kpi).
+    # None у остальных ролей и у аналитика, который прогноз не подал:
+    # «прогноза нет» и «прогноз оказался плохим» — разные вещи, и точность
+    # в первом случае не считается, а обнуляется явно.
+    price_forecast: float | None = None
     created_at: datetime = Field(default_factory=_utcnow)
+
+
+class RoleScore(SQLModel, table=True):
+    """Личный KPI роли за раунд и итоговая оценка студента.
+
+    Пишется при закрытии раунда чистой функцией :func:`core.role_kpi.
+    compute_role_kpis` — сохраняются и сырое значение показателя (для разбора),
+    и нормированное (для сравнения ролей между собой), и обе составляющие
+    итога. Одна строка на (round, team, role); пересчёт раунда её обновляет.
+    """
+
+    __table_args__ = (
+        UniqueConstraint(
+            "round_id", "team_id", "role", name="uq_rolescore_round_team_role"
+        ),
+    )
+
+    id: int | None = Field(default=None, primary_key=True)
+    round_id: int = Field(foreign_key="round.id", index=True)
+    team_id: int = Field(foreign_key="team.id", index=True)
+    role: Role
+    # Сырое значение KPI в своих единицах (доля рынка / маржа / точность).
+    kpi_raw: float
+    kpi_name: str
+    # То же значение относительно лучшего в раунде внутри своей роли, 0..1.
+    kpi_normalized: float
+    # Прибыль команды относительно лучшей в раунде, 0..1.
+    team_component: float
+    # 0.7 × team_component + 0.3 × kpi_normalized (веса — ScoreWeights).
+    total: float
+    # Были ли у роли данные для её KPI (для аналитика — подан ли прогноз).
+    has_input: bool = True

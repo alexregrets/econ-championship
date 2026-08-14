@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from enum import StrEnum
 
-__all__ = ["Role", "Method", "RoundStatus", "EngineMode"]
+__all__ = ["Role", "Method", "RoundStatus"]
 
 
 class Role(StrEnum):
@@ -33,20 +33,6 @@ class Method(StrEnum):
     HETEROSCEDASTICITY = "heteroscedasticity"  # White, Breusch-Pagan, GLS
     AUTOCORRELATION = "autocorrelation"  # Durbin-Watson, Breusch-Godfrey
     PANEL_DATA = "panel_data"  # Fixed / random effects
-
-
-class EngineMode(StrEnum):
-    """Which Cournot engine scores a round (see OPEN_QUESTIONS.md №7).
-
-    ``SYMMETRIC``  — one shared marginal cost from ``Round.market_mc``
-        (:mod:`core.market_engine`); default, matches all pre-existing rounds.
-    ``ASYMMETRIC`` — per-team implied costs stored on
-        :class:`~db.role_models.CompanyGroundTruth`
-        (:mod:`core.market_engine_asymmetric`); opt-in per round.
-    """
-
-    SYMMETRIC = "symmetric"
-    ASYMMETRIC = "asymmetric"
 
 
 class RoundStatus(StrEnum):

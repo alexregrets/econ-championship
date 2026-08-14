@@ -98,16 +98,32 @@ async def submit_role_proposal(
     role: Role,
     quantity: float,
     note: str = "",
+    price_forecast: float | None = None,
 ) -> RoleInput:
     """Сохранить предложение роли (можно перезаписывать, пока раунд открыт).
+
+    ``price_forecast`` — прогноз рыночной цены; вход личного KPI аналитика
+    сбыта (:mod:`core.role_kpi`). Другие роли его не подают: прогноз, пришедший
+    не от аналитика, отклоняется, чтобы KPI нельзя было набрать чужой ролью.
 
     Raises
     ------
     ValueError
-        Если раунд не существует, не открыт или Q отрицателен.
+        Если раунд не существует, не открыт, Q отрицателен, прогноз цены
+        отрицателен или прогноз подан ролью, отличной от аналитика сбыта.
     """
     if quantity < 0:
         raise ValueError(f"quantity must be >= 0, got {quantity}")
+    if price_forecast is not None:
+        if role is not Role.SALES_ANALYST:
+            raise ValueError(
+                f"прогноз цены подаёт только {Role.SALES_ANALYST.value}, "
+                f"а не {role.value}"
+            )
+        if price_forecast < 0:
+            raise ValueError(
+                f"price_forecast must be >= 0, got {price_forecast}"
+            )
     round_ = await repo.get_round(session, round_id)
     if round_ is None:
         raise ValueError(f"round {round_id} not found")
@@ -123,6 +139,7 @@ async def submit_role_proposal(
         role=role,
         quantity_proposal=quantity,
         note=note,
+        price_forecast=price_forecast,
     )
 
 
