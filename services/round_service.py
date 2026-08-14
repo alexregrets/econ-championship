@@ -7,16 +7,31 @@ only marshals data in and out and updates cumulative standings.
 
 from __future__ import annotations
 
+from collections.abc import Sequence
+
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from core.market_engine import MarketParameters, TeamResult, compute_cournot_round
 from core.market_engine_asymmetric import compute_asymmetric_cournot_round
+from core.market_events import (
+    MarketShock,
+    apply_to_costs,
+    apply_to_demand,
+    apply_to_parameters,
+)
+from db import event_repositories as event_repo
 from db import repositories as repo
 from db import role_repositories as role_repo
 from db.enums import EngineMode, RoundStatus
 from db.models import Decision, Round
 
-__all__ = ["open_round", "compute_round_results", "close_round"]
+__all__ = [
+    "open_round",
+    "round_shocks",
+    "effective_parameters",
+    "compute_round_results",
+    "close_round",
+]
 
 
 async def open_round(session: AsyncSession, round_id: int) -> None:
@@ -30,6 +45,46 @@ async def open_round(session: AsyncSession, round_id: int) -> None:
     await repo.set_round_status(
         session, round_id=round_id, status=RoundStatus.OPEN
     )
+
+
+async def round_shocks(session: AsyncSession, round_id: int) -> list[MarketShock]:
+    """Загрузить события раунда как шоки для движка.
+
+    Слой перевода между хранением и расчётом: в БД событие — это строка с
+    текстом для витрины и флагом видимости, движку же нужен только вид и
+    величина. ``revealed`` сюда сознательно не переезжает — он управляет тем,
+    что команды видят до подачи решения, а не тем, как считается рынок.
+    Скрытый шок бьёт по рынку ровно так же, как публичный.
+
+    Порядок событий не важен: свёртка мультипликативна и коммутативна.
+    """
+    events = await event_repo.list_events_for_round(session, round_id)
+    return [
+        MarketShock(kind=e.kind, magnitude=e.magnitude, headline=e.headline)
+        for e in events
+    ]
+
+
+def effective_parameters(
+    round_: Round, shocks: Sequence[MarketShock]
+) -> MarketParameters:
+    """Параметры симметричного рынка после событий раунда.
+
+    ``Round`` не мутируется: базовые ``market_a`` / ``market_b`` / ``market_mc``
+    остаются в БД нетронутыми. Это не мелочь — без исходных параметров нельзя
+    провести разбор после раунда и показать командам, где именно их подвинуло
+    событие, а не собственное решение.
+
+    Raises
+    ------
+    ValueError
+        Если после событий рынок нежизнеспособен (издержки догнали точку
+        насыщения спроса).
+    """
+    base = MarketParameters(
+        a=round_.market_a, b=round_.market_b, marginal_cost=round_.market_mc
+    )
+    return apply_to_parameters(base, shocks)
 
 
 async def _asymmetric_costs(
@@ -69,9 +124,12 @@ async def compute_round_results(
 ) -> dict[str, TeamResult]:
     """Run the Cournot engine on a round's decisions and persist the outcomes.
 
-    Loads every decision for the round, evaluates the market with the round's
-    stored parameters, writes a :class:`~db.models.Result` per decision, and adds
-    each team's profit to its cumulative standing.
+    Loads every decision for the round, evaluates the market at the round's
+    *effective* parameters — the stored ones after this round's market events
+    are applied — writes a :class:`~db.models.Result` per decision, and adds each
+    team's profit to its cumulative standing. A round with no events is scored
+    on the stored parameters unchanged: the shock factors are exactly ``1.0``,
+    so the arithmetic is bit-for-bit what it was before events existed.
 
     Parameters
     ----------
@@ -88,9 +146,12 @@ async def compute_round_results(
     Raises
     ------
     ValueError
-        If the round does not exist, has no submitted decisions, or is an
+        If the round does not exist, has no submitted decisions, is an
         asymmetric round missing per-team implied costs (see
-        :func:`_asymmetric_costs`).
+        :func:`_asymmetric_costs`), or if this round's events leave the market
+        unviable — costs at or above the demand choke price. Refusing is
+        deliberate: a market nobody can profitably produce in is a setup error,
+        and scoring it anyway would hand teams meaningless numbers.
     """
     round_ = await repo.get_round(session, round_id)
     if round_ is None:
@@ -101,18 +162,26 @@ async def compute_round_results(
         raise ValueError(f"round {round_id} has no decisions to score")
 
     quantities = {str(d.team_id): d.quantity for d in decisions}
+    shocks = await round_shocks(session, round_id)
+
     if round_.engine_mode is EngineMode.ASYMMETRIC:
+        # Спрос и издержки сдвигаются раздельно: шок спроса трогает только
+        # a и b, шок издержек — только c_i. Издержки проверяются против уже
+        # сдвинутой точки насыщения, то есть против того рынка, на котором
+        # раунд и будет считаться, а не против исходного.
+        a, b = apply_to_demand(round_.market_a, round_.market_b, shocks)
+        costs = apply_to_costs(
+            await _asymmetric_costs(session, round_, decisions),
+            shocks,
+            demand_intercept=a,
+        )
         results = compute_asymmetric_cournot_round(
-            quantities,
-            a=round_.market_a,
-            b=round_.market_b,
-            marginal_costs=await _asymmetric_costs(session, round_, decisions),
+            quantities, a=a, b=b, marginal_costs=costs
         )
     else:
-        params = MarketParameters(
-            a=round_.market_a, b=round_.market_b, marginal_cost=round_.market_mc
+        results = compute_cournot_round(
+            quantities, effective_parameters(round_, shocks)
         )
-        results = compute_cournot_round(quantities, params)
 
     for decision in decisions:
         assert decision.id is not None  # persisted rows always have an id
