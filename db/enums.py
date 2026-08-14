@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from enum import StrEnum
 
-__all__ = ["Role", "Method", "RoundStatus", "EngineMode"]
+__all__ = ["Role", "Method", "RoundStatus", "EngineMode", "EventKind"]
 
 
 class Role(StrEnum):
@@ -47,6 +47,29 @@ class EngineMode(StrEnum):
 
     SYMMETRIC = "symmetric"
     ASYMMETRIC = "asymmetric"
+
+
+class EventKind(StrEnum):
+    """Какой параметр рынка сдвигает событие раунда.
+
+    Каждое событие несёт ``magnitude`` (относительное изменение) и
+    превращается в мультипликативный ``factor = 1 + magnitude``. События
+    одного типа перемножаются, а не складываются: −10% и −20% дают
+    ``0.9 * 0.8 = 0.72``. Умножение коммутативно, поэтому итог раунда не
+    зависит от порядка, в котором события были заведены.
+
+    ``DEMAND_SHIFT``      — сдвиг точки насыщения ``a``: рынок целиком стал
+        богаче или беднее при той же чувствительности к объёму.
+    ``ELASTICITY_SHIFT``  — сдвиг наклона ``b``: цена стала резче или мягче
+        реагировать на суммарный выпуск.
+    ``COST_SHOCK``        — сдвиг предельных издержек. Единственный тип,
+        доходящий до ``apply_to_costs``; шоки спроса меняют ``a``/``b`` и в
+        издержки не попадают.
+    """
+
+    DEMAND_SHIFT = "demand_shift"
+    ELASTICITY_SHIFT = "elasticity_shift"
+    COST_SHOCK = "cost_shock"
 
 
 class RoundStatus(StrEnum):
