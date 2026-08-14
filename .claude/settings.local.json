@@ -12,7 +12,14 @@
       "PowerShell($ErrorActionPreference='SilentlyContinue'; for \\($i=1; $i -le 5; $i++\\) { python -m uv sync 2>&1 | Out-Null; if \\($LASTEXITCODE -eq 0\\) { Write-Output \"SYNC OK on attempt $i\"; break } else { Write-Output \"attempt $i failed, retrying\" } })",
       "PowerShell(python -m uv run pytest -q 2>&1 | Select-Object -Last 20)",
       "PowerShell(python -m uv run ruff check core tests 2>&1 | Select-Object -Last 20; Write-Output \"=== MYPY ===\"; python -m uv run mypy core 2>&1 | Select-Object -Last 20)",
-      "PowerShell(python -m uv run ruff check core tests 2>&1 | Select-Object -Last 5; Write-Output \"=== PYTEST ===\"; python -m uv run pytest -q 2>&1 | Select-Object -Last 3)"
+      "PowerShell(python -m uv run ruff check core tests 2>&1 | Select-Object -Last 5; Write-Output \"=== PYTEST ===\"; python -m uv run pytest -q 2>&1 | Select-Object -Last 3)",
+      "Bash(uv run *)",
+      "Bash(\"./.venv/Scripts/python.exe\" -m pytest -q)",
+      "Bash(where.exe uv *)",
+      "Bash(where.exe python *)",
+      "Bash(where.exe py *)",
+      "Bash(py -3.12 --version)",
+      "Bash(python -m pip install --user uv)"
     ]
   }
 }

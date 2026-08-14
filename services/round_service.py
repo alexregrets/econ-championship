@@ -10,8 +10,11 @@ from __future__ import annotations
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from core.market_engine import MarketParameters, TeamResult, compute_cournot_round
+from core.market_engine_asymmetric import compute_asymmetric_cournot_round
 from db import repositories as repo
-from db.enums import RoundStatus
+from db import role_repositories as role_repo
+from db.enums import EngineMode, RoundStatus
+from db.models import Decision, Round
 
 __all__ = ["open_round", "compute_round_results", "close_round"]
 
@@ -27,6 +30,38 @@ async def open_round(session: AsyncSession, round_id: int) -> None:
     await repo.set_round_status(
         session, round_id=round_id, status=RoundStatus.OPEN
     )
+
+
+async def _asymmetric_costs(
+    session: AsyncSession, round_: Round, decisions: list[Decision]
+) -> dict[str, float]:
+    """Collect per-team implied marginal costs for an asymmetric round.
+
+    Costs live on :class:`~db.role_models.CompanyGroundTruth` (written by
+    ``generate_role_views`` from the calibrated scenario). Every deciding team
+    must have one — a missing ground truth or an empty ``implied_marginal_cost``
+    is a configuration error, not a case for a silent fallback to ``market_mc``.
+
+    Raises
+    ------
+    ValueError
+        If any deciding team lacks a ground truth row or a calibrated cost.
+    """
+    assert round_.id is not None  # loaded from the DB
+    truths = await role_repo.list_ground_truths_for_round(session, round_.id)
+    costs = {
+        str(t.team_id): t.implied_marginal_cost
+        for t in truths
+        if t.implied_marginal_cost is not None
+    }
+    missing = sorted(str(d.team_id) for d in decisions if str(d.team_id) not in costs)
+    if missing:
+        raise ValueError(
+            f"asymmetric round {round_.id} has no calibrated per-team costs for "
+            f"teams {missing}; generate role views (ground truth with implied "
+            "costs) before closing the round"
+        )
+    return {str(d.team_id): costs[str(d.team_id)] for d in decisions}
 
 
 async def compute_round_results(
@@ -53,7 +88,9 @@ async def compute_round_results(
     Raises
     ------
     ValueError
-        If the round does not exist or has no submitted decisions.
+        If the round does not exist, has no submitted decisions, or is an
+        asymmetric round missing per-team implied costs (see
+        :func:`_asymmetric_costs`).
     """
     round_ = await repo.get_round(session, round_id)
     if round_ is None:
@@ -63,11 +100,19 @@ async def compute_round_results(
     if not decisions:
         raise ValueError(f"round {round_id} has no decisions to score")
 
-    params = MarketParameters(
-        a=round_.market_a, b=round_.market_b, marginal_cost=round_.market_mc
-    )
     quantities = {str(d.team_id): d.quantity for d in decisions}
-    results = compute_cournot_round(quantities, params)
+    if round_.engine_mode is EngineMode.ASYMMETRIC:
+        results = compute_asymmetric_cournot_round(
+            quantities,
+            a=round_.market_a,
+            b=round_.market_b,
+            marginal_costs=await _asymmetric_costs(session, round_, decisions),
+        )
+    else:
+        params = MarketParameters(
+            a=round_.market_a, b=round_.market_b, marginal_cost=round_.market_mc
+        )
+        results = compute_cournot_round(quantities, params)
 
     for decision in decisions:
         assert decision.id is not None  # persisted rows always have an id

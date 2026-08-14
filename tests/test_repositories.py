@@ -11,9 +11,9 @@ from collections.abc import AsyncIterator
 import pytest
 import pytest_asyncio
 from sqlalchemy.exc import IntegrityError
-from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
+from sqlalchemy.ext.asyncio import create_async_engine
 from sqlmodel import SQLModel
-from sqlmodel.ext.asyncio.session import AsyncSession as SQLModelAsyncSession
+from sqlmodel.ext.asyncio.session import AsyncSession
 
 # Importing models registers the tables on SQLModel.metadata.
 from db import models  # noqa: F401
@@ -27,7 +27,7 @@ async def session() -> AsyncIterator[AsyncSession]:
     engine = create_async_engine("sqlite+aiosqlite:///:memory:")
     async with engine.begin() as conn:
         await conn.run_sync(SQLModel.metadata.create_all)
-    async with SQLModelAsyncSession(engine, expire_on_commit=False) as s:
+    async with AsyncSession(engine, expire_on_commit=False) as s:
         yield s
     await engine.dispose()
 
