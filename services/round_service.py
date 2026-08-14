@@ -19,10 +19,11 @@ from core.market_events import (
     apply_to_demand,
     apply_to_parameters,
 )
+from core.role_kpi import RoleKpi, compute_role_kpis
 from db import event_repositories as event_repo
 from db import repositories as repo
 from db import role_repositories as role_repo
-from db.enums import EngineMode, RoundStatus
+from db.enums import EngineMode, Role, RoundStatus
 from db.models import Decision, Round
 
 __all__ = [
@@ -30,6 +31,7 @@ __all__ = [
     "round_shocks",
     "effective_parameters",
     "compute_round_results",
+    "score_roles",
     "close_round",
 ]
 
@@ -199,15 +201,84 @@ async def compute_round_results(
     return results
 
 
+async def _price_forecasts(
+    session: AsyncSession, round_id: int
+) -> dict[str, float | None]:
+    """Прогнозы цены аналитиков сбыта, ``team_id -> прогноз или None``.
+
+    Берётся только ввод роли :attr:`~db.enums.Role.SALES_ANALYST`: у остальных
+    ролей ``price_forecast`` пуст по смыслу, и тащить их в словарь означало бы
+    затирать поданный прогноз пустым значением при совпадении команды.
+    """
+    inputs = await role_repo.list_role_inputs_for_round(session, round_id)
+    return {
+        str(role_input.team_id): role_input.price_forecast
+        for role_input in inputs
+        if role_input.role is Role.SALES_ANALYST
+    }
+
+
+async def score_roles(
+    session: AsyncSession, round_id: int, results: dict[str, TeamResult]
+) -> dict[str, dict[Role, RoleKpi]]:
+    """Посчитать личные KPI ролей за раунд и записать :class:`RoleScore`.
+
+    Личная часть оценки существует ради конфликта интересов: маркетолог
+    премируется за долю рынка, финансист — за маржу, аналитик — за точность
+    прогноза цены. Маркетолог тянет выпуск вверх, финансист вниз, и команда
+    вынуждена разруливать спор, а не усреднять его.
+
+    Запись идёт через upsert: пересчёт раунда (например, после исправления
+    события) обновляет оценки, а не задваивает их.
+
+    Parameters
+    ----------
+    results:
+        Уже посчитанные результаты раунда — эта функция ничего не считает
+        заново и не трогает движок.
+
+    Returns
+    -------
+    dict[str, dict[Role, RoleKpi]]
+        По команде — по три оценки, в том же виде, что вернул
+        :func:`core.role_kpi.compute_role_kpis`.
+    """
+    scores = compute_role_kpis(results, await _price_forecasts(session, round_id))
+
+    for team_id, per_role in scores.items():
+        for role, kpi in per_role.items():
+            await role_repo.upsert_role_score(
+                session,
+                round_id=round_id,
+                team_id=int(team_id),
+                role=role,
+                kpi_raw=kpi.raw,
+                kpi_name=kpi.raw_name,
+                kpi_normalized=kpi.normalized,
+                team_component=kpi.team_component,
+                total=kpi.total,
+                has_input=kpi.has_input,
+            )
+
+    return scores
+
+
 async def close_round(
     session: AsyncSession, round_id: int
 ) -> dict[str, TeamResult]:
-    """Compute results then mark the round closed (locking further submissions).
+    """Score the round, write per-role KPI, then lock it against further submissions.
+
+    Order matters. Results and role scores are written *before* the status flips
+    to ``CLOSED``, so a round that cannot be scored — an unviable market, a
+    missing calibrated cost — stays ``OPEN`` and can be fixed and retried.
+    Flipping the status first would leave a round locked and unscored, which is
+    the one state nobody can get out of from the dashboard.
 
     Returns the computed results. Raises :class:`ValueError` for the same reasons
     as :func:`compute_round_results`.
     """
     results = await compute_round_results(session, round_id)
+    await score_roles(session, round_id, results)
     await repo.set_round_status(
         session, round_id=round_id, status=RoundStatus.CLOSED
     )
