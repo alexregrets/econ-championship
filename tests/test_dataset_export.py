@@ -20,8 +20,10 @@ from sqlalchemy.ext.asyncio import create_async_engine
 from sqlmodel import SQLModel
 from sqlmodel.ext.asyncio.session import AsyncSession
 
+from core.cases import REGIME_COLUMN, supported_methods
 from db import models  # noqa: F401  (регистрирует таблицы)
 from db import repositories as repo
+from db.enums import Method
 from devshell.role_seed import seed_oil_2013
 from devshell.seed import seed
 from services.dataset_export import (
@@ -175,3 +177,64 @@ async def test_same_round_gives_same_dataset(session: AsyncSession) -> None:
 async def test_missing_round_raises(session: AsyncSession) -> None:
     with pytest.raises(ValueError):
         await build_round_dataset(session, 999)
+
+
+# --------------------------------------------------------------------------- #
+# Данные под метод раунда
+# --------------------------------------------------------------------------- #
+
+
+async def _round_with_method(session: AsyncSession, method: Method) -> int:
+    """Открытый раунд с заданным методом на том же рынке, что и пилот."""
+    summary = await seed_oil_2013(session)
+    source = await repo.get_round(session, summary.round_id)
+    assert source is not None
+    created = await repo.create_round(
+        session,
+        number=source.number + 1,
+        method=method,
+        difficulty=source.difficulty,
+        market_a=source.market_a,
+        market_b=source.market_b,
+        market_mc=source.market_mc,
+    )
+    assert created.id is not None
+    return created.id
+
+
+async def test_regime_round_carries_its_own_column(session: AsyncSession) -> None:
+    """Раунд по фиктивным переменным выдаёт столбец режима, а не голый спрос.
+
+    До фазы 2 все шесть методов получали одну и ту же историю, и раунд по
+    дамми ничем не отличался от раунда по парной регрессии — метод было
+    нечего применять.
+    """
+    round_id = await _round_with_method(session, Method.OLS_MULTIPLE)
+    dataset = await build_round_dataset(session, round_id)
+
+    assert REGIME_COLUMN in {c.name for c in dataset.columns}
+    flags = {row[REGIME_COLUMN] for row in dataset.rows}
+    assert flags == {0.0, 1.0}
+
+    # Столбец без описания бесполезен: студент не поймёт, что это за единица.
+    assert REGIME_COLUMN in data_dictionary_markdown(dataset)
+
+    # И доезжает до самого файла, а не только до объекта.
+    rows = list(csv.DictReader(io.StringIO(to_csv(dataset))))
+    assert {row[REGIME_COLUMN] for row in rows} == {"0.0", "1.0"}
+
+
+async def test_round_without_a_case_refuses_to_export(session: AsyncSession) -> None:
+    """Метод без кейса роняет выгрузку, а не подсовывает baseline.
+
+    Громкий отказ на настройке раунда стоит минуты. Молчаливая подмена стоит
+    раунда целиком: заявленному методу нечего было бы искать в данных,
+    и заметили бы это последним.
+    """
+    missing = next((m for m in Method if m not in supported_methods()), None)
+    if missing is None:
+        pytest.skip("все шесть методов уже реализованы")
+
+    round_id = await _round_with_method(session, missing)
+    with pytest.raises(NotImplementedError):
+        await build_round_dataset(session, round_id)

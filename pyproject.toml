@@ -54,5 +54,12 @@ strict = true
 module = ["textual.*", "streamlit.*", "pandas.*"]
 ignore_missing_imports = true
 
+# statsmodels стабов не публикует и py.typed не несёт — types-пакета для него
+# не существует, в отличие от openpyxl. Живёт только в тестах, где проверяются
+# свойства данных, а не типы, поэтому override здесь честнее заглушек.
+[[tool.mypy.overrides]]
+module = ["statsmodels.*"]
+ignore_missing_imports = true
+
 [tool.uv]
 package = false

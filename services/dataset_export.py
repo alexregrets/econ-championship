@@ -30,7 +30,8 @@ from dataclasses import dataclass
 from openpyxl import Workbook
 from sqlmodel.ext.asyncio.session import AsyncSession
 
-from core.dataset import HistorySpec, generate_market_history
+from core.cases import build_case
+from core.dataset import HistorySpec
 from core.market_engine import MarketParameters, nash_equilibrium
 from db import repositories as repo
 from db.enums import Method
@@ -180,7 +181,13 @@ async def build_round_dataset(session: AsyncSession, round_id: int) -> Dataset:
     n_firms = max(len(teams), 1)
     reference_quantity = nash_equilibrium(n_firms, params) * n_firms
 
-    history = generate_market_history(
+    # Данные строятся под метод раунда: в раунде по фиктивным переменным
+    # в них лежит смена режима, в раунде по парной регрессии — чистый спрос.
+    # Метод без своего кейса роняет выгрузку намеренно (см. core.cases):
+    # выдать вместо него baseline значило бы объявить раунд по методу,
+    # которому в данных нечего искать.
+    case = build_case(
+        round_.method,
         params,
         reference_quantity=reference_quantity,
         spec=HistorySpec(
@@ -198,10 +205,24 @@ async def build_round_dataset(session: AsyncSession, round_id: int) -> Dataset:
             "Суммарный выпуск рынка за период — сумма по всем фирмам",
         ),
         Column("price", "$/т", "Рыночная цена, сложившаяся при этом выпуске"),
+        *(Column(c.name, c.unit, c.description) for c in case.extra_columns),
     )
+
+    forbidden = {c.name for c in columns} & FORBIDDEN_COLUMNS
+    if forbidden:
+        raise ValueError(
+            f"кейс метода {round_.method.value} объявил запрещённые столбцы: "
+            f"{sorted(forbidden)}. Через выгрузку истина наружу не уходит"
+        )
+
     rows = [
-        {"period": float(o.period), "quantity": o.quantity, "price": o.price}
-        for o in history
+        {
+            "period": float(o.period),
+            "quantity": o.quantity,
+            "price": o.price,
+            **{name: float(value) for name, value in o.extras.items()},
+        }
+        for o in case.observations
     ]
 
     return Dataset(
