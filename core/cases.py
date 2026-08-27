@@ -22,6 +22,7 @@
 
 from __future__ import annotations
 
+import math
 from collections.abc import Callable
 from dataclasses import dataclass, replace
 
@@ -35,6 +36,8 @@ __all__ = [
     "CaseData",
     "RegimeShiftSpec",
     "DEFAULT_REGIME_SHIFT",
+    "HeteroskedasticitySpec",
+    "DEFAULT_HETEROSKEDASTICITY",
     "build_case",
     "supported_methods",
 ]
@@ -141,6 +144,64 @@ class RegimeShiftSpec:
 
 
 DEFAULT_REGIME_SHIFT = RegimeShiftSpec()
+
+
+@dataclass(frozen=True)
+class HeteroskedasticitySpec:
+    """Настройка неоднородного разброса — раунд 4, «Удобрения и газ».
+
+    Сюжет. Скачок газовых цен ударил по себестоимости азотных удобрений,
+    экспортные квоты добавили неопределённости. Чем крупнее рынок в периоде,
+    тем сильнее разброс: на больших объёмах в игру вступают дальние поставки,
+    спотовые контракты и штрафы за срыв — цена гуляет заметно шире.
+
+    Attributes
+    ----------
+    spread_ratio:
+        Во сколько раз разброс цены на верхнем крае коридора выпуска выше,
+        чем на нижнем. Задаётся отношением, а не показателем степени: коридор
+        сам считается от числа фирм, и одна и та же степень давала бы при
+        шести командах вдвое более слабый эффект, чем при трёх. Отношение
+        держит силу кейса постоянной.
+
+        Двенадцать — не круглое число, а замер: при нём тест Уайта отвергает
+        гомоскедастичность на всех проверенных зёрнах и составах с запасом
+        (наибольшее ``p`` = 0.006), а цена не подходит к нулю ближе, чем
+        на 150. При шести отвергал лишь в 60 % случаев — команда, честно
+        применившая метод, на своих данных ничего бы не увидела.
+    periods_multiplier:
+        Во сколько раз история этого раунда длиннее обычной. Чтобы говорить
+        о **дисперсии**, наблюдений нужно больше, чем чтобы говорить
+        о среднем: на тридцати точках Уайт ловил подложенный эффект в 60–80 %
+        случаев, на шестидесяти — в 100 %. Это не костыль, а свойство самого
+        метода, и его честнее оплатить длиной истории, чем силой эффекта.
+
+    Raises
+    ------
+    ValueError
+        Если разброс не растёт (``spread_ratio <= 1``) — тогда это baseline,
+        и заявленному методу нечего обнаруживать, — либо множитель периодов
+        меньше единицы.
+    """
+
+    spread_ratio: float = 12.0
+    periods_multiplier: int = 2
+
+    def __post_init__(self) -> None:
+        if self.spread_ratio <= 1.0:
+            raise ValueError(
+                "spread_ratio должен быть больше единицы: при равном разбросе "
+                "гетероскедастичности нет и тест Уайта её не найдёт, получено "
+                f"{self.spread_ratio}"
+            )
+        if self.periods_multiplier < 1:
+            raise ValueError(
+                "periods_multiplier не может быть меньше единицы: короткая "
+                f"история лишает тест мощности, получено {self.periods_multiplier}"
+            )
+
+
+DEFAULT_HETEROSKEDASTICITY = HeteroskedasticitySpec()
 
 
 def _regime_seed(seed: int, index: int) -> int:
@@ -339,12 +400,94 @@ def _build_regime_shift(
     return CaseData(observations=observations, extra_columns=columns)
 
 
+def _build_heteroskedastic(
+    params: MarketParameters,
+    *,
+    reference_quantity: float,
+    spec: HistorySpec,
+    hetero: HeteroskedasticitySpec = DEFAULT_HETEROSKEDASTICITY,
+) -> CaseData:
+    """Раунд 4 — разброс цены растёт с размером рынка.
+
+    Кейс устроен принципиально иначе, чем раунд 2, и в этом его смысл
+    (``CASES.md``). Гетероскедастичность **не смещает** точечную оценку —
+    она занижает стандартные ошибки. Наивная команда видит узкий
+    доверительный интервал, принимает шаткую оценку за точную и ставит
+    агрессивно; правильный вывод здесь — не другое число, а осторожный объём.
+
+    Поэтому и ловушка ставится иначе: подкручивается не положение линии,
+    а масштаб остатков. Остаток каждого наблюдения восстанавливается точно
+    (``e = P − (a − bQ)``) и умножается на вес, растущий с выпуском. Линия
+    спроса при этом не двигается ни на йоту: несмещённость сохраняется
+    по построению, а не по счастливому совпадению.
+
+    Вес нормируется на своё среднее — иначе кейс менял бы заодно и общий
+    уровень шума, и раунд по гетероскедастичности оказался бы попутно
+    в полтора раза более шумным, чем остальные. Это ровно тот класс ошибки,
+    когда правишь одно, а меняешь два.
+
+    Показатель степени выводится из ``spread_ratio``, а не задаётся напрямую:
+    коридор выпуска считается от числа фирм, поэтому одна и та же степень
+    при шести командах дала бы вдвое более слабый эффект, чем при трёх.
+
+    Чего этот раунд **не** делает
+    -----------------------------
+    Он не наказывает деньгами, и это проверено, а не предположено.
+    ``CASES.md`` обещал, что осторожный объём здесь окупается; замер
+    27 августа показал обратное. Команда, поставившая по точечной оценке,
+    получает 99.8–100 % оптимальной прибыли даже в худшем из сорока зёрен,
+    а осторожная — 96 %: страховка стоит дороже риска, от которого страхует.
+
+    Причина не в настройках. Прибыль вблизи оптимума плоская — потеря равна
+    ``(1−k)²``, — а сорок пять наблюдений при физически допустимом уровне
+    шума дают ``k`` в диапазоне 0.93–1.10. Поднять шум нельзя: цена уходит
+    за ноль раньше, чем ошибка становится ощутимой. **Раунд 4 оценивается
+    рубрикой метода — заметил, проверил, дал честный интервал, — а не
+    прибылью.** Ставить его результат в зависимость от денег значило бы
+    награждать за угадывание.
+
+    Raises
+    ------
+    ValueError
+        Если после растяжения остатков цена уходит за ноль.
+    """
+    history = generate_market_history(
+        params,
+        reference_quantity=reference_quantity,
+        spec=replace(spec, periods=spec.periods * hetero.periods_multiplier),
+    )
+
+    # Границы коридора выпуска — те же, в которых генератор гулял по Q.
+    low = 1.0 - spec.quantity_spread
+    high = 1.0 + spec.quantity_spread
+    exponent = math.log(hetero.spread_ratio) / math.log(high / low)
+
+    raw = [(o.quantity / reference_quantity) ** exponent for o in history]
+    mean_raw = sum(raw) / len(raw)
+    weights = [value / mean_raw for value in raw]
+
+    observations: list[Observation] = []
+    for observation, weight in zip(history, weights, strict=True):
+        clean_price = params.a - params.b * observation.quantity
+        stretched = clean_price + (observation.price - clean_price) * weight
+        if stretched <= 0:
+            raise ValueError(
+                f"период {observation.period}: растянутый остаток уводит цену "
+                f"в {stretched:.2f}. spread_ratio={hetero.spread_ratio} слишком "
+                f"велик для этого рынка — уменьшите его или сузьте коридор выпуска"
+            )
+        observations.append(replace(observation, price=stretched))
+
+    return CaseData(observations=observations)
+
+
 # Тип строителя кейса. Именованно, чтобы реестр читался, а не расшифровывался.
 CaseBuilder = Callable[..., CaseData]
 
 _BUILDERS: dict[Method, CaseBuilder] = {
     Method.OLS_SIMPLE: _build_simple,
     Method.OLS_MULTIPLE: _build_regime_shift,
+    Method.HETEROSCEDASTICITY: _build_heteroskedastic,
 }
 
 
