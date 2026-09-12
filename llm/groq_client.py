@@ -7,7 +7,9 @@ Pydantic model, retrying on transport errors and on malformed/invalid JSON.
 
 from __future__ import annotations
 
+import asyncio
 import json
+from collections.abc import Awaitable, Callable
 from typing import TypeVar
 
 import httpx
@@ -19,8 +21,14 @@ __all__ = ["GroqClient"]
 
 T = TypeVar("T", bound=BaseModel)
 
-_DEFAULT_MODEL = "llama-3.3-70b-versatile"
+_DEFAULT_MODEL = "openai/gpt-oss-120b"
 _BASE_URL = "https://api.groq.com/openai/v1"
+# Пауза перед повтором после 429/5xx, секунд, если сервер не назвал свою
+# (``Retry-After``). Удваивается с каждой попыткой. Ключ Groq общий с ботами
+# на VPS, лимит в минуту делится между ними — на 12.09 семь подряд запросов
+# грейдинга упёрлись в 429 на второй команде.
+_BACKOFF_BASE_SECONDS = 2.0
+_BACKOFF_MAX_SECONDS = 30.0
 
 
 class GroqClient:
@@ -31,7 +39,9 @@ class GroqClient:
     api_key:
         Groq API key.
     model:
-        Model id to use. Defaults to ``llama-3.3-70b-versatile``.
+        Model id to use. Defaults to ``openai/gpt-oss-120b`` —
+        ``llama-3.3-70b-versatile`` снята с Groq (404 на 12.09.2026); та же
+        модель, что у ``uni_mail_bot`` (решение 21.08.2026).
     timeout:
         Per-request timeout in seconds.
     """
@@ -42,6 +52,7 @@ class GroqClient:
         model: str = _DEFAULT_MODEL,
         *,
         timeout: float = 30.0,
+        sleep: Callable[[float], Awaitable[None]] = asyncio.sleep,
     ) -> None:
         if not api_key:
             raise ValueError("api_key must not be empty")
@@ -49,6 +60,25 @@ class GroqClient:
         self.model = model
         self.timeout = timeout
         self.base_url = _BASE_URL
+        self._sleep = sleep  # подменяется в тестах, чтобы не ждать по-настоящему
+
+    @staticmethod
+    def _retry_delay(response: httpx.Response | None, attempt: int) -> float | None:
+        """Сколько ждать перед повтором; ``None`` — повторять сразу.
+
+        429 и 5xx — временные, ждём (``Retry-After`` сервера, иначе
+        экспонента). Прочие HTTP-ошибки и невалидный JSON повторяются без
+        паузы: там дело не в нагрузке.
+        """
+        if response is None or response.status_code not in (429, 500, 502, 503, 504):
+            return None
+        header = response.headers.get("retry-after")
+        if header:
+            try:
+                return min(float(header), _BACKOFF_MAX_SECONDS)
+            except ValueError:
+                pass
+        return float(min(_BACKOFF_BASE_SECONDS * 2.0**attempt, _BACKOFF_MAX_SECONDS))
 
     async def structured_completion(
         self,
@@ -105,7 +135,7 @@ class GroqClient:
 
         last_error: Exception | None = None
         async with httpx.AsyncClient(timeout=self.timeout) as client:
-            for _attempt in range(max_retries):
+            for attempt in range(max_retries):
                 try:
                     response = await client.post(
                         f"{self.base_url}/chat/completions",
@@ -122,6 +152,10 @@ class GroqClient:
                     ValidationError,
                 ) as exc:
                     last_error = exc
+                    failed = exc.response if isinstance(exc, httpx.HTTPStatusError) else None
+                    delay = self._retry_delay(failed, attempt)
+                    if delay is not None and attempt + 1 < max_retries:
+                        await self._sleep(delay)
                     continue
 
         raise LLMError(

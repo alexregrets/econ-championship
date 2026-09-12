@@ -565,3 +565,33 @@ async def test_market_preview_warns_on_tight_market(session: AsyncSession) -> No
     assert any("тесный" in w for w in tight.warnings)
     wide = await market_preview(session, market_a=300.0, market_b=1.0, market_mc=10.0)
     assert not any("тесный" in w for w in wide.warnings)
+
+
+async def test_second_open_round_is_refused(session: AsyncSession) -> None:
+    """Один открытый раунд за раз: иначе бот шлёт решения не туда.
+    Черновик второго раунда в базе не остаётся."""
+    first = await _make_round(session)
+    with pytest.raises(ValueError, match="ещё открыт"):
+        await create_and_open_round(
+            session,
+            number=2,
+            difficulty=1,
+            market_a=120.0,
+            market_b=1.0,
+            market_mc=10.0,
+            case_narrative="",
+        )
+    rounds = await repo.list_rounds(session)
+    assert [r.id for r in rounds] == [first]
+    # После закрытия первого второй открывается.
+    await repo.set_round_status(session, round_id=first, status=RoundStatus.CLOSED)
+    second = await create_and_open_round(
+        session,
+        number=2,
+        difficulty=1,
+        market_a=120.0,
+        market_b=1.0,
+        market_mc=10.0,
+        case_narrative="",
+    )
+    assert second.status is RoundStatus.OPEN

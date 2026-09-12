@@ -40,11 +40,23 @@ __all__ = [
 async def open_round(session: AsyncSession, round_id: int) -> None:
     """Mark a round as open for submissions.
 
+    The tournament runs one round at a time: the bot routes ``/brief``,
+    ``/data`` and ``/submit`` to *the* open round, so a second open round
+    would silently receive nothing while the first keeps collecting
+    decisions meant for the new one. Caught on the 2026-09-12 live run —
+    the seeder opens round 1, the instructor created round 2 on top of it.
+
     Raises
     ------
     ValueError
-        If the round does not exist.
+        If the round does not exist, or another round is already open.
     """
+    current = await repo.get_open_round(session)
+    if current is not None and current.id != round_id:
+        raise ValueError(
+            f"раунд №{current.number} ещё открыт — закройте его, прежде чем "
+            "открывать новый: бот принимает решения только в один раунд"
+        )
     await repo.set_round_status(
         session, round_id=round_id, status=RoundStatus.OPEN
     )

@@ -224,6 +224,14 @@ async def create_and_open_round(
             f"под метод {method.value} кейса ещё нет; доступны: "
             f"{', '.join(m.value for m in METHOD_CHOICES)}"
         )
+    # Проверка до записи: open_round откажет и сам, но черновик уже лежал бы в
+    # базе и всплывал в списке раундов как «ещё один» — путал бы препода.
+    current = await repo.get_open_round(session)
+    if current is not None:
+        raise ValueError(
+            f"раунд №{current.number} ещё открыт — закройте его, прежде чем "
+            "открывать новый: бот принимает решения только в один раунд"
+        )
     round_ = await repo.create_round(
         session,
         number=number,
