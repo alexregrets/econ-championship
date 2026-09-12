@@ -122,29 +122,62 @@ uv run streamlit run dashboard/app.py
 Copy `.env.example` to `.env` and fill in the Telegram token and Groq key.
 See `DEPLOYMENT.md` for the VPS setup.
 
+## Running a round (instructor, ~10 minutes)
+
+```bash
+uv run python -m devshell.seed          # teams, students, join codes
+uv run python -m devshell.team_codes    # print /join codes to hand out
+uv run streamlit run dashboard/app.py   # instructor dashboard + public view
+uv run python -m bot.main               # Telegram bot (separate terminal)
+```
+
+1. **Rounds → New round**: pick the method (the week's topic) and market
+   parameters. The form shows the Nash outcome for the current number of
+   teams and warns if the market is too tight or the parameters repeat the
+   previous round (teams see the equilibrium after closing).
+2. Teams pull the brief and data in Telegram (`/brief`, `/data`) or on the
+   public view. The data carries the pattern the method is meant to find;
+   a naive estimate misses it and loses money.
+3. Teams submit `/submit <Q> <reasoning>`; resubmission allowed while open.
+4. **Close round** — Cournot engine prices the market. Teams get `/result`:
+   what they expected, what they got, what the best response was.
+5. **Review panel**: what each team believed and who fell into the trap.
+   **Micro-defence**: one team × one role × one question, drawn
+   deterministically; the answer has to be spoken.
+6. **Grade reasoning (Groq)**: method rubric, with the round's true numbers
+   handed to the grader so a named estimate is checked, not just present.
+
+Set `DASHBOARD_PASSWORD` in `.env` before exposing the dashboard; the public
+view stays open.
+
+## Anti-offload design
+
+Nothing here bans AI. Three layers make "paste it into a chatbot" expensive:
+
+- **Trap in the data** (`core/cases`): where the method biases the point
+  estimate (regime shift), the naive procedure is calibrated to recover 0.35·b
+  and overproduce — the loss is in money, visibly.
+- **Rubric that demands numbers** (`core/rubrics`): every criterion asks for a
+  figure from this dataset, the trap named with its direction, or the link
+  from estimate to quantity. The grader sees the round's truth and checks.
+- **Oral micro-defence** (`core/defence`): a deterministic draw after each
+  round. A model can write the reasoning; it cannot answer ten seconds later.
+
 ## Where this actually stands
 
-Pre-production. Target is a working prototype for the September 2026 semester.
-
-248 tests pass across 18 of 19 test modules.
-
-Working: both engines, calibration on 2013 data, role model with private
-slices, market events, role KPI, Telegram bot, dashboard, public view,
-rubric grading.
+Working prototype, September 2026. 450+ tests. Three of six methods have
+cases (simple OLS, dummies/regime shift, heteroscedasticity); the other
+three exist as scenarios in `CASES.md` and cannot be selected for a round.
 
 Not done:
 
-- Market events are not wired into round closing. `services.round_service`
-  is missing `effective_parameters`, which is why
-  `tests/test_round_service_events.py` — the nineteenth module — does not
-  import. The test file is the specification; the implementation is what is
-  missing, not the design.
-- Role KPI has the same gap: `compute_role_kpis` is fully tested but nothing
-  calls it outside the tests.
 - No migrations. The schema is one SQLite file, so any change means recreating
-  the database. Tolerable now, not tolerable once a real round has been played —
-  migrations have to land before the first live round, not after.
+  the database. Migrations have to land before the first live round, not after.
+- Analyst report upload (phase 3 in `LOOP_PROMPT.md`), market events form in
+  the dashboard, VPS deployment.
 - Realism mechanics 2 through 6 in `GAME_DESIGN.md` are designed, not built.
+- The trap detector goes blind when several teams fall in at once — options
+  and a recommendation in `LOOP_LOG.md`, iteration 4 of 2026-09-12.
 
 `STATE.md` carries the current snapshot and the ordered recovery plan.
 `DECISIONS.md` records why things are the way they are — read it before

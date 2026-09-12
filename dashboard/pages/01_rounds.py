@@ -24,6 +24,7 @@ from core.trap import Verdict  # noqa: E402
 from dashboard.actions import (  # noqa: E402
     METHOD_CHOICES,
     DefenceCard,
+    MarketPreview,
     ResultRow,
     ReviewRow,
     RoundHistoryRow,
@@ -33,6 +34,7 @@ from dashboard.actions import (  # noqa: E402
     create_and_open_round,
     defence_draw,
     grade_round_reasoning,
+    market_preview,
     next_round_number,
     results_table,
     review_panel,
@@ -132,6 +134,16 @@ def render_create_form(suggested_number: int) -> None:
             return
         engine_mode = next(mode for mode, label in _ENGINE_LABELS.items() if label == engine_label)
         method = next(m for m, label in METHOD_CHOICES.items() if label == method_label)
+        preview: MarketPreview = run_db(
+            partial(
+                market_preview,
+                market_a=float(market_a),
+                market_b=float(market_b),
+                market_mc=float(market_mc),
+            )
+        )
+        for warning in preview.warnings:
+            st.warning(warning)
         round_ = run_db(
             partial(
                 create_and_open_round,
@@ -145,8 +157,13 @@ def render_create_form(suggested_number: int) -> None:
                 method=method,
             )
         )
-        st.success(f"Раунд №{round_.number} создан и открыт (id={round_.id}).")
-        st.rerun()
+        st.success(
+            f"Раунд №{round_.number} создан и открыт (id={round_.id}). "
+            f"При {preview.n_firms} командах Нэш: q ≈ {preview.nash_quantity:.2f} "
+            f"на фирму, цена ≈ {preview.nash_price:.2f}."
+        )
+        if not preview.warnings:
+            st.rerun()
 
 
 # STUB: заменить на Telegram-бота после MVP, не строить сейчас.

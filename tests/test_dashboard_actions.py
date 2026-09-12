@@ -523,3 +523,45 @@ async def test_defence_draw_only_after_close_and_only_among_deciders(
     redraw = await defence_draw(session, round_id, attempt=1)
     assert redraw is not None and redraw.attempt == 1
     assert redraw == await defence_draw(session, round_id, attempt=1)
+
+
+# --------------------------------------------------------------------------- #
+# market_preview: подсказки преподавателю перед созданием раунда
+# --------------------------------------------------------------------------- #
+
+
+async def test_market_preview_computes_nash_for_team_count(session: AsyncSession) -> None:
+    from dashboard.actions import market_preview
+
+    for i in range(3):
+        await repo.create_team(session, name=f"T{i}", company_name=f"C{i}")
+    preview = await market_preview(session, market_a=100.0, market_b=1.0, market_mc=10.0)
+    assert preview.n_firms == 3
+    assert preview.nash_quantity == pytest.approx(22.5)
+    assert preview.nash_price == pytest.approx(32.5)
+    assert preview.warnings == ()
+
+
+async def test_market_preview_warns_on_repeated_parameters(session: AsyncSession) -> None:
+    from dashboard.actions import market_preview
+
+    await _make_round(session)  # a=100, b=1, c=10
+    preview = await market_preview(session, market_a=100.0, market_b=1.0, market_mc=10.0)
+    assert any("совпадают" in w for w in preview.warnings)
+    changed = await market_preview(session, market_a=120.0, market_b=1.0, market_mc=10.0)
+    assert not any("совпадают" in w for w in changed.warnings)
+
+
+async def test_market_preview_warns_on_tight_market(session: AsyncSession) -> None:
+    """Семь команд на 100/1/15: цена Нэша 25.6, полоса 10.6 > 0.25·25.6 — нет;
+    берём 100/1/20: цена 30, полоса 10 < 7.5? нет. Считаем честно ниже."""
+    from dashboard.actions import market_preview
+
+    for i in range(7):
+        await repo.create_team(session, name=f"T{i}", company_name=f"C{i}")
+    # a=100, b=1, c=40 при семи: q = 60/8 = 7.5, P = 100 - 52.5 = 47.5,
+    # полоса 7.5 < 0.25 · 47.5 = 11.9 → тесный.
+    tight = await market_preview(session, market_a=100.0, market_b=1.0, market_mc=40.0)
+    assert any("тесный" in w for w in tight.warnings)
+    wide = await market_preview(session, market_a=300.0, market_b=1.0, market_mc=10.0)
+    assert not any("тесный" in w for w in wide.warnings)

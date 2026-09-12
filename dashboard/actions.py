@@ -20,7 +20,7 @@ from config import settings
 from core.beliefs import recover_beliefs
 from core.cases import supported_methods
 from core.defence import DefenceDraw, DefenceQuestion, draw_defence
-from core.market_engine import MarketParameters
+from core.market_engine import MarketParameters, nash_equilibrium
 from core.market_events import apply_to_costs, apply_to_demand
 from core.rubric_grader import RubricCriterion, grade_submission
 from core.rubrics import DEFAULT_RUBRICS, rubric_for_method
@@ -115,6 +115,71 @@ _METHOD_LABELS: dict[Method, str] = {
 METHOD_CHOICES: dict[Method, str] = {
     method: _METHOD_LABELS[method] for method in supported_methods()
 }
+
+
+# Полоса «цена Нэша − издержки» уже этой доли цены — рынок тесный: одна
+# ошибка команды в 2× роняет цену к нулю, разбор превращается в бойню.
+_NARROW_BAND_SHARE = 0.25
+
+
+@dataclass(frozen=True)
+class MarketPreview:
+    """Что получится из параметров формы при текущем числе команд."""
+
+    n_firms: int
+    nash_quantity: float  # на фирму
+    nash_price: float
+    price_band: float  # P* − c
+    warnings: tuple[str, ...]
+
+
+async def market_preview(
+    session: AsyncSession, *, market_a: float, market_b: float, market_mc: float
+) -> MarketPreview:
+    """Предпросмотр рынка и предупреждения перед созданием раунда.
+
+    Два предупреждения, оба — из живого прогона 12.09:
+
+    * параметры совпадают с прошлым раундом — после закрытия команды видят
+      равновесие, и следующий раунд с теми же `a`, `b`, `c` решается по
+      памяти, а не по данным;
+    * рынок тесный для этого числа команд — полоса `P* − c` меньше четверти
+      цены, одна ошибка в 2× выносит цену в ноль.
+
+    Предупреждения не блокируют: решение за преподавателем.
+    """
+    teams = await repo.list_teams(session)
+    n = max(len(teams), 1)
+    params = MarketParameters(a=market_a, b=market_b, marginal_cost=market_mc)
+    q = nash_equilibrium(n, params)
+    price = market_a - market_b * q * n
+    band = price - market_mc
+    warnings: list[str] = []
+
+    previous = await latest_round(session)
+    if previous is not None and (
+        previous.market_a == market_a
+        and previous.market_b == market_b
+        and previous.market_mc == market_mc
+    ):
+        warnings.append(
+            f"Параметры совпадают с раундом №{previous.number}. После закрытия "
+            "команды видят равновесие — этот раунд они решат по памяти, а не по "
+            "данным. Измените хотя бы a или b."
+        )
+    if price > 0 and band < _NARROW_BAND_SHARE * price:
+        warnings.append(
+            f"Рынок тесный для {n} команд: цена Нэша {price:.1f}, издержки "
+            f"{market_mc:g}, полоса {band:.1f}. Одна ошибка в 2× по объёму уронит "
+            "цену к нулю. Поднимите a или снизьте c."
+        )
+    return MarketPreview(
+        n_firms=n,
+        nash_quantity=q,
+        nash_price=price,
+        price_band=band,
+        warnings=tuple(warnings),
+    )
 
 
 async def next_round_number(session: AsyncSession) -> int:
