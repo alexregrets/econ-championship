@@ -238,3 +238,96 @@ async def test_teacher_summary_no_open_round(session: AsyncSession) -> None:
     summary = await teacher_summary(session)
     assert summary.open_round_number is None
     assert summary.decisions_submitted == 0
+
+
+# --------------------------------------------------------------------------- #
+# Комната данных: брифинг + выгрузка для команды
+# --------------------------------------------------------------------------- #
+
+
+async def test_data_room_bundles_brief_and_exports(session: AsyncSession) -> None:
+    from dashboard.actions import create_and_open_round, data_room
+    from db.enums import Method
+    from services.dataset_export import DISCLAIMER
+
+    # Режимный сдвиг откалиброван на 3–6 фирм: коридор выпуска считается от
+    # числа команд, и без команд исторический выпуск уходит в минус.
+    for i in range(3):
+        await repo.create_team(session, name=f"T{i}", company_name=f"C{i}")
+    round_ = await create_and_open_round(
+        session,
+        number=1,
+        difficulty=1,
+        market_a=100.0,
+        market_b=1.0,
+        market_mc=10.0,
+        case_narrative="",
+        method=Method.OLS_MULTIPLE,
+    )
+    assert round_.id is not None
+    room = await data_room(session, round_.id)
+    assert room is not None
+
+    # Брифинг и словарь несут подпись «учебные данные», CSV — чистый.
+    assert DISCLAIMER in room.brief_markdown
+    assert DISCLAIMER in room.dictionary_markdown
+    assert DISCLAIMER not in room.csv_text
+    # В CSV шапка + наблюдения; режимный сдвиг добавляет свой столбец.
+    lines = room.csv_text.strip().splitlines()
+    assert lines[0].split(",")[:3] == ["period", "quantity", "price"]
+    assert "regime_new" in lines[0]
+    assert len(lines) - 1 == room.observations
+    assert room.observations > 0
+    # XLSX — настоящий zip-контейнер, а не пустые байты.
+    assert room.xlsx_bytes[:2] == b"PK"
+    assert room.filename_stem == "round_01_ols_multiple"
+
+
+async def test_data_room_is_deterministic_per_round(session: AsyncSession) -> None:
+    """Два вызова — байт в байт одно и то же: разбор после раунда возможен."""
+    from dashboard.actions import create_and_open_round, data_room
+
+    round_ = await create_and_open_round(
+        session,
+        number=1,
+        difficulty=1,
+        market_a=100.0,
+        market_b=1.0,
+        market_mc=10.0,
+        case_narrative="",
+    )
+    assert round_.id is not None
+    first = await data_room(session, round_.id)
+    second = await data_room(session, round_.id)
+    assert first is not None and second is not None
+    assert first.csv_text == second.csv_text
+    assert first.brief_markdown == second.brief_markdown
+
+
+async def test_data_room_none_for_missing_round(session: AsyncSession) -> None:
+    from dashboard.actions import data_room
+
+    assert await data_room(session, 999) is None
+
+
+async def test_data_room_fails_loudly_without_teams_on_regime_shift(
+    session: AsyncSession,
+) -> None:
+    """Раунд по режимному сдвигу без команд: данные не собираются, и это
+    ValueError с объяснением, а не пустая комната. Страница показывает текст."""
+    from dashboard.actions import create_and_open_round, data_room
+    from db.enums import Method
+
+    round_ = await create_and_open_round(
+        session,
+        number=1,
+        difficulty=1,
+        market_a=100.0,
+        market_b=1.0,
+        market_mc=10.0,
+        case_narrative="",
+        method=Method.OLS_MULTIPLE,
+    )
+    assert round_.id is not None
+    with pytest.raises(ValueError, match="quantity_gap_ratio"):
+        await data_room(session, round_.id)

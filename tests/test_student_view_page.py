@@ -66,3 +66,15 @@ def test_student_view_renders_seeded_round(tmp_database: str) -> None:
     assert at.selectbox
     markdown_text = " ".join(str(m.value) for m in at.markdown)
     assert "/join" in markdown_text and "/submit" in markdown_text
+
+
+def test_student_view_shows_data_room_with_brief(tmp_database: str) -> None:
+    """Комната данных на витрине: брифинг виден, кнопки скачивания есть."""
+    _seed_oil(tmp_database)
+    at = AppTest.from_file(str(_PAGE), default_timeout=30)
+    at.run()
+    assert not at.exception, f"страница упала: {at.exception}"
+    markdown_text = " ".join(str(m.value) for m in at.markdown)
+    assert "Комната данных" in " ".join(str(h.value) for h in at.subheader)
+    assert "Учебные данные" in markdown_text
+    assert "Что у вас на руках" in markdown_text

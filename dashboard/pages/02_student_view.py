@@ -27,10 +27,12 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 from dashboard.actions import (  # noqa: E402
+    DataRoom,
     EquilibriumComparison,
     MarketBrief,
     ScenarioDataset,
     TeamProgress,
+    data_room,
     equilibrium_comparison,
     latest_round,
     market_brief,
@@ -151,6 +153,53 @@ def render_scenario_dataset(dataset: ScenarioDataset | None) -> None:
     )
 
 
+def render_data_room(round_id: int) -> None:
+    """Комната данных: брифинг раунда и выгрузка CSV/XLSX со словарём.
+
+    Единственное место, где команда получает данные для оценки спроса.
+    Раунд, под который данные не собираются (метод без кейса в старой базе,
+    слишком мало команд для калибровки), показывает причину текстом —
+    молча пустую комнату не рисуем.
+    """
+    st.subheader("Комната данных")
+    try:
+        room: DataRoom | None = run_db(partial(data_room, round_id=round_id))
+    except (ValueError, NotImplementedError) as exc:
+        st.warning(f"Данные раунда не собираются: {exc}")
+        return
+    if room is None:
+        return
+
+    with st.expander("Брифинг раунда — читать первым", expanded=True):
+        st.markdown(room.brief_markdown)
+
+    st.caption(f"{room.observations} наблюдений · {room.title}")
+    csv_col, xlsx_col, dict_col = st.columns(3)
+    csv_col.download_button(
+        "Скачать CSV",
+        data=room.csv_text.encode("utf-8"),
+        file_name=f"{room.filename_stem}.csv",
+        mime="text/csv",
+        key=f"csv_{round_id}",
+    )
+    xlsx_col.download_button(
+        "Скачать XLSX (с словарём)",
+        data=room.xlsx_bytes,
+        file_name=f"{room.filename_stem}.xlsx",
+        mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        key=f"xlsx_{round_id}",
+    )
+    dict_col.download_button(
+        "Словарь данных (.md)",
+        data=room.dictionary_markdown.encode("utf-8"),
+        file_name=f"{room.filename_stem}_dictionary.md",
+        mime="text/markdown",
+        key=f"dict_{round_id}",
+    )
+    with st.expander("Словарь данных"):
+        st.markdown(room.dictionary_markdown)
+
+
 def render_equilibrium(comparison: EquilibriumComparison | None) -> None:
     """После закрытия раунда: «где мы оказались относительно равновесия»."""
     if comparison is None:
@@ -222,6 +271,7 @@ def main() -> None:
     assert round_.id is not None
     render_market_brief(run_db(partial(market_brief, round_id=round_.id)))
     render_scenario_dataset(run_db(partial(scenario_dataset, round_id=round_.id)))
+    render_data_room(round_.id)
     render_equilibrium(run_db(partial(equilibrium_comparison, round_id=round_.id)))
 
     st.divider()

@@ -25,6 +25,14 @@ from db.enums import EngineMode, Method, Role, RoundStatus
 from db.models import Decision, Round
 from llm.base import StructuredLLM
 from llm.groq_client import GroqClient
+from services.dataset_export import (
+    Dataset,
+    build_round_dataset,
+    data_dictionary_markdown,
+    to_csv,
+    to_xlsx,
+)
+from services.round_brief import render_team_brief
 from services.round_service import close_round, open_round
 
 __all__ = [
@@ -513,6 +521,48 @@ async def scenario_dataset(
         },
         industry_cost_per_ton=FULL_COST_2013_USD_PER_TON,
         observed_price_per_ton=URALS_PRICE_2013_USD_PER_TON,
+    )
+
+
+@dataclass(frozen=True)
+class DataRoom:
+    """Всё, что команда получает на руки в раунде: брифинг и выгрузка.
+
+    Собирается из одного и того же :class:`~services.dataset_export.Dataset`,
+    чтобы брифинг описывал ровно те столбцы, что лежат в файле. Истина
+    (``CompanyGroundTruth``, параметры рынка) сюда не попадает — это держит
+    тест на утечку в ``tests/test_dataset_export.py``.
+    """
+
+    title: str
+    brief_markdown: str
+    dictionary_markdown: str
+    csv_text: str
+    xlsx_bytes: bytes
+    filename_stem: str
+    observations: int
+
+
+async def data_room(session: AsyncSession, round_id: int) -> DataRoom | None:
+    """Комната данных раунда для витрины: ``None``, если раунда нет.
+
+    Раунд по методу без кейса сюда не доходит — его отсекает
+    :func:`create_and_open_round`. Если такой всё же лежит в старой базе,
+    ``build_round_dataset`` упадёт ``NotImplementedError`` — и пусть: тихо
+    показать пустую комнату хуже, чем громко.
+    """
+    round_ = await repo.get_round(session, round_id)
+    if round_ is None:
+        return None
+    dataset: Dataset = await build_round_dataset(session, round_id)
+    return DataRoom(
+        title=dataset.title,
+        brief_markdown=render_team_brief(dataset),
+        dictionary_markdown=data_dictionary_markdown(dataset),
+        csv_text=to_csv(dataset),
+        xlsx_bytes=to_xlsx(dataset),
+        filename_stem=dataset.filename_stem,
+        observations=len(dataset.rows),
     )
 
 
