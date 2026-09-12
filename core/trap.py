@@ -83,12 +83,18 @@ def trap_verdict(
         Наклоны неположительны или не конечны; полосы «верно» и «попался»
         пересекаются при заданном допуске.
     """
-    if not math.isfinite(implied_slope) or implied_slope <= 0.0:
-        raise ValueError(f"implied_slope must be finite and positive, got {implied_slope}")
+    if not math.isfinite(implied_slope):
+        raise ValueError(f"implied_slope must be finite, got {implied_slope}")
     if not math.isfinite(true_slope) or true_slope <= 0.0:
         raise ValueError(f"true_slope must be finite and positive, got {true_slope}")
     if naive_ratio is None:
         return Verdict.NO_TRAP
+    if implied_slope <= 0.0:
+        # Остаточный спрос ушёл под издержки: соперники затопили рынок, и ни
+        # один положительный наклон не оправдывает сданный объём. Это не
+        # «попался» и не ошибка данных — это OFF, смотреть отчёт команды.
+        # Поймано живым прогоном на семи командах, а не тестами.
+        return Verdict.OFF
     if not 0.0 < naive_ratio < 1.0:
         raise ValueError(f"naive_ratio must lie in (0, 1), got {naive_ratio}")
     if tolerance <= 0.0 or 2.0 * tolerance >= 1.0 - naive_ratio:

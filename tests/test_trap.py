@@ -59,10 +59,18 @@ def test_tolerance_bands_must_not_overlap() -> None:
         trap_verdict(0.5, 1.0, 0.35, tolerance=0.4)
 
 
-@pytest.mark.parametrize("implied", [0.0, -1.0, float("nan"), float("inf")])
-def test_degenerate_implied_slope_raises(implied: float) -> None:
+@pytest.mark.parametrize("implied", [float("nan"), float("inf")])
+def test_non_finite_implied_slope_raises(implied: float) -> None:
     with pytest.raises(ValueError):
         trap_verdict(implied, 1.0, 0.35)
+
+
+@pytest.mark.parametrize("implied", [0.0, -0.857])
+def test_flooded_market_gives_off_not_error(implied: float) -> None:
+    """Соперники затопили рынок, остаточный спрос под издержками, b̂ ≤ 0:
+    объём ничем не оправдан, но это OFF, а не падение панели разбора.
+    Поймано живым прогоном на семи командах."""
+    assert trap_verdict(implied, 1.0, 0.35) is Verdict.OFF
 
 
 def test_nonpositive_true_slope_raises() -> None:
