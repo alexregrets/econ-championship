@@ -26,7 +26,7 @@ from dashboard.actions import (
 from db import models  # noqa: F401  (регистрирует таблицы)
 from db import repositories as repo
 from db import role_repositories as role_repo
-from db.enums import Role, RoundStatus
+from db.enums import EngineMode, Role, RoundStatus
 from devshell.role_seed import (
     TOTAL_PRODUCTION_2013_MLN_T,
     URALS_PRICE_2013_USD_PER_TON,
@@ -331,3 +331,49 @@ async def test_data_room_fails_loudly_without_teams_on_regime_shift(
     assert round_.id is not None
     with pytest.raises(ValueError, match="quantity_gap_ratio"):
         await data_room(session, round_.id)
+
+
+async def test_data_room_for_team_states_its_cost(session: AsyncSession) -> None:
+    from dashboard.actions import create_and_open_round, data_room
+
+    teams = [
+        await repo.create_team(session, name=f"T{i}", company_name=f"C{i}")
+        for i in range(3)
+    ]
+    round_ = await create_and_open_round(
+        session,
+        number=1,
+        difficulty=1,
+        market_a=100.0,
+        market_b=1.0,
+        market_mc=12.5,
+        case_narrative="",
+    )
+    assert round_.id is not None and teams[1].id is not None
+    room = await data_room(session, round_.id, team_id=teams[1].id)
+    assert room is not None
+    assert "## Ваша фирма" in room.brief_markdown
+    assert "12.5" in room.brief_markdown
+    assert "Фирм на рынке:** 3" in room.brief_markdown
+    assert "C1" in room.brief_markdown
+    # Истина по-прежнему не утекает: ни a, ни b в брифинге нет числом.
+    assert "100" not in room.brief_markdown.replace("100 наблюдений", "")
+
+
+async def test_firm_card_asymmetric_requires_ground_truth(session: AsyncSession) -> None:
+    from dashboard.actions import create_and_open_round, firm_card
+
+    team = await repo.create_team(session, name="T", company_name="C")
+    round_ = await create_and_open_round(
+        session,
+        number=1,
+        difficulty=1,
+        market_a=100.0,
+        market_b=1.0,
+        market_mc=10.0,
+        case_narrative="",
+        engine_mode=EngineMode.ASYMMETRIC,
+    )
+    assert round_.id is not None and team.id is not None
+    with pytest.raises(ValueError, match="калиброванных издержек"):
+        await firm_card(session, round_.id, team.id)

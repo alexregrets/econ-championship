@@ -5,8 +5,12 @@
 ними, кто на нём работает и что на нём произошло**, и ставит задачу. Без
 брифинга регрессия по столбцам ``quantity``/``price`` — упражнение без контекста.
 
-Что в брифинг НЕ входит: истинные ``a``, ``b``, издержки, разбор подложенной
-в данные проблемы. Метод раунда команде известен от преподавателя — брифинг
+Что в брифинг НЕ входит: истинные ``a``, ``b``, разбор подложенной в данные
+проблемы. **Свои** предельные издержки и число фирм на рынке команда обязана
+знать (:class:`FirmCard`): без ``c`` условие первого порядка не решается, и
+игра превращается в угадайку — это поймано на прогоне 12.09, когда брифинг
+обещал «издержки даны отдельно», а отдельно их не давал никто.
+Метод раунда команде известен от преподавателя — брифинг
 описывает рыночное событие сюжетом, а не подсказкой «где искать».
 
 Легенды — :data:`NARRATIVES`, по одной на реализованный метод. Ключи держатся
@@ -22,7 +26,13 @@ from dataclasses import dataclass
 from db.enums import Method
 from services.dataset_export import DISCLAIMER, Dataset
 
-__all__ = ["CaseNarrative", "NARRATIVES", "case_narrative", "render_team_brief"]
+__all__ = [
+    "CaseNarrative",
+    "FirmCard",
+    "NARRATIVES",
+    "case_narrative",
+    "render_team_brief",
+]
 
 
 @dataclass(frozen=True)
@@ -50,6 +60,28 @@ class CaseNarrative:
     assignment: str
 
 
+@dataclass(frozen=True)
+class FirmCard:
+    """Что команда знает о собственной фирме и составе рынка.
+
+    Attributes
+    ----------
+    company_name:
+        Компания команды — как в турнире, не по сюжету легенды.
+    marginal_cost:
+        Предельные издержки фирмы в единицах цены. В симметричном раунде —
+        общие для рынка, в асимметричном — свои у каждой команды.
+    n_firms:
+        Сколько фирм на рынке, включая саму команду. Это число команд
+        турнира — данные раунда откалиброваны под него, и сюжетные «три
+        компании» его не заменяют.
+    """
+
+    company_name: str
+    marginal_cost: float
+    n_firms: int
+
+
 NARRATIVES: dict[Method, CaseNarrative] = {
     Method.OLS_SIMPLE: CaseNarrative(
         market=(
@@ -66,7 +98,7 @@ NARRATIVES: dict[Method, CaseNarrative] = {
         assignment=(
             "По истории наблюдений оцените линию спроса P = a − b·Q. Подставьте "
             "оценку в условие первого порядка своей фирмы и выберите объём выпуска "
-            "на следующий период. Предельные издержки вашей компании даны отдельно."
+            "на следующий период. Предельные издержки вашей компании — в разделе «Ваша фирма»."
         ),
     ),
     Method.OLS_MULTIPLE: CaseNarrative(
@@ -129,15 +161,34 @@ def case_narrative(method: Method) -> CaseNarrative:
     return narrative
 
 
-def render_team_brief(dataset: Dataset) -> str:
-    """Собрать брифинг команды в Markdown: сюжет, задача, что на руках.
+def render_team_brief(dataset: Dataset, *, firm: FirmCard | None = None) -> str:
+    """Собрать брифинг команды в Markdown: сюжет, задача, фирма, что на руках.
 
     Самодостаточен: включает таблицу переменных, чтобы команда не сверялась
     со словарём данных отдельно. Companion — сама выгрузка (CSV/XLSX) из
     :mod:`services.dataset_export`.
+
+    ``firm`` — карточка команды: без неё брифинг общий (превью на витрине
+    без выбранной команды), с ней — рабочий документ, по которому можно
+    решать. Издержки в нём обязаны быть: это единственное место, где
+    команда их узнаёт.
     """
     narrative = case_narrative(dataset.method)
     companies = ", ".join(narrative.companies)
+    firm_lines: list[str] = []
+    if firm is not None:
+        firm_lines = [
+            "## Ваша фирма",
+            "",
+            f"**Компания:** {firm.company_name}.",
+            "",
+            f"**Предельные издержки:** {firm.marginal_cost:g} за единицу выпуска "
+            "(в единицах цены из таблицы), постоянные на весь период.",
+            "",
+            f"**Фирм на рынке:** {firm.n_firms}, включая вас — это команды турнира. "
+            "Выпуск в таблице — суммарный по всем ним.",
+            "",
+        ]
 
     lines = [
         f"# Раунд {dataset.round_number} — {dataset.title}",
@@ -158,6 +209,7 @@ def render_team_brief(dataset: Dataset) -> str:
         "",
         narrative.assignment,
         "",
+        *firm_lines,
         "## Что у вас на руках",
         "",
         f"Таблица из {len(dataset.rows)} наблюдений (файл выгрузки), столбцы:",

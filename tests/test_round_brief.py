@@ -16,7 +16,12 @@ import pytest
 from core.cases import supported_methods
 from db.enums import Method
 from services.dataset_export import DISCLAIMER, Column, Dataset
-from services.round_brief import NARRATIVES, case_narrative, render_team_brief
+from services.round_brief import (
+    NARRATIVES,
+    FirmCard,
+    case_narrative,
+    render_team_brief,
+)
 
 
 def _dataset(method: Method) -> Dataset:
@@ -97,3 +102,21 @@ def test_narrative_is_frozen() -> None:
 
     with pytest.raises(dataclasses.FrozenInstanceError):
         case_narrative(Method.OLS_SIMPLE).market = "x"  # type: ignore[misc]
+
+
+def test_brief_with_firm_card_states_cost_and_market_size() -> None:
+    """Без своих издержек команда не решит условие первого порядка —
+    карточка фирмы обязана попасть в брифинг числом, а не обещанием."""
+    firm = FirmCard(company_name="Команда А", marginal_cost=364.0, n_firms=7)
+    brief = render_team_brief(_dataset(Method.OLS_SIMPLE), firm=firm)
+    assert "## Ваша фирма" in brief
+    assert "364" in brief
+    assert "Фирм на рынке:** 7" in brief
+    assert "Команда А" in brief
+    # Обещания «даны отдельно» больше нет.
+    assert "даны отдельно" not in brief
+
+
+def test_brief_without_firm_card_has_no_firm_section() -> None:
+    brief = render_team_brief(_dataset(Method.OLS_SIMPLE))
+    assert "## Ваша фирма" not in brief

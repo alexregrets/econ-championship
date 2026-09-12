@@ -153,17 +153,23 @@ def render_scenario_dataset(dataset: ScenarioDataset | None) -> None:
     )
 
 
-def render_data_room(round_id: int) -> None:
+def render_data_room(round_id: int, team_id: int | None) -> None:
     """Комната данных: брифинг раунда и выгрузка CSV/XLSX со словарём.
 
     Единственное место, где команда получает данные для оценки спроса.
+    С выбранной командой брифинг содержит карточку фирмы — издержки и
+    число фирм; без неё это общее превью, по которому решать нельзя.
     Раунд, под который данные не собираются (метод без кейса в старой базе,
     слишком мало команд для калибровки), показывает причину текстом —
     молча пустую комнату не рисуем.
     """
     st.subheader("Комната данных")
+    if team_id is None:
+        st.caption("Выберите команду ниже — брифинг покажет издержки вашей фирмы.")
     try:
-        room: DataRoom | None = run_db(partial(data_room, round_id=round_id))
+        room: DataRoom | None = run_db(
+            partial(data_room, round_id=round_id, team_id=team_id)
+        )
     except (ValueError, NotImplementedError) as exc:
         st.warning(f"Данные раунда не собираются: {exc}")
         return
@@ -271,18 +277,23 @@ def main() -> None:
     assert round_.id is not None
     render_market_brief(run_db(partial(market_brief, round_id=round_.id)))
     render_scenario_dataset(run_db(partial(scenario_dataset, round_id=round_.id)))
-    render_data_room(round_.id)
+
+    # Команда выбирается до комнаты данных: брифинг зависит от того, чья фирма.
+    teams: list[Team] = run_db(repo.list_teams)
+    team: Team | None = None
+    if teams:
+        labels = {f"{t.name} ({t.company_name})": t for t in teams}
+        chosen = st.selectbox("Команда", list(labels))
+        team = labels[chosen]
+    else:
+        st.info("Команд ещё нет.")
+
+    render_data_room(round_.id, None if team is None else team.id)
     render_equilibrium(run_db(partial(equilibrium_comparison, round_id=round_.id)))
 
     st.divider()
     st.subheader("Прогресс команды")
-    teams: list[Team] = run_db(repo.list_teams)
-    if not teams:
-        st.info("Команд ещё нет.")
-    else:
-        labels = {f"{t.name} ({t.company_name})": t for t in teams}
-        chosen = st.selectbox("Команда", list(labels))
-        team = labels[chosen]
+    if team is not None:
         assert team.id is not None
         progress = run_db(
             partial(team_role_progress, round_id=round_.id, team_id=team.id)

@@ -36,7 +36,7 @@ from services.dataset_export import (
     to_csv,
     to_xlsx,
 )
-from services.round_brief import render_team_brief
+from services.round_brief import FirmCard, render_team_brief
 from services.round_service import (
     asymmetric_costs,
     close_round,
@@ -645,8 +645,48 @@ class DataRoom:
     observations: int
 
 
-async def data_room(session: AsyncSession, round_id: int) -> DataRoom | None:
-    """Комната данных раунда для витрины: ``None``, если раунда нет.
+async def firm_card(session: AsyncSession, round_id: int, team_id: int) -> FirmCard:
+    """Карточка фирмы для брифинга: издержки команды и число фирм на рынке.
+
+    Симметричный раунд — общие ``market_mc``; асимметричный — пофирменные
+    издержки из ground truth, и без них карточка не собирается: выдать
+    команде «издержки неизвестны» значит выдать нерешаемую задачу.
+
+    Raises
+    ------
+    ValueError
+        Раунда или команды нет; в асимметричном раунде у команды нет
+        калиброванных издержек.
+    """
+    round_ = await repo.get_round(session, round_id)
+    if round_ is None:
+        raise ValueError(f"round {round_id} not found")
+    team = await repo.get_team(session, team_id)
+    if team is None:
+        raise ValueError(f"team {team_id} not found")
+    n_firms = max(len(await repo.list_teams(session)), 1)
+    if round_.engine_mode is EngineMode.ASYMMETRIC:
+        truths = await role_repo.list_ground_truths_for_round(session, round_id)
+        cost = next(
+            (t.implied_marginal_cost for t in truths if t.team_id == team_id), None
+        )
+        if cost is None:
+            raise ValueError(
+                f"asymmetric round {round_id}: у команды {team.name} нет "
+                "калиброванных издержек — сгенерируйте ролевые срезы"
+            )
+    else:
+        cost = round_.market_mc
+    return FirmCard(company_name=team.company_name, marginal_cost=cost, n_firms=n_firms)
+
+
+async def data_room(
+    session: AsyncSession, round_id: int, team_id: int | None = None
+) -> DataRoom | None:
+    """Комната данных раунда для витрины и бота: ``None``, если раунда нет.
+
+    С ``team_id`` брифинг содержит карточку фирмы (издержки, число фирм) —
+    рабочий документ команды. Без него — общее превью.
 
     Раунд по методу без кейса сюда не доходит — его отсекает
     :func:`create_and_open_round`. Если такой всё же лежит в старой базе,
@@ -657,9 +697,10 @@ async def data_room(session: AsyncSession, round_id: int) -> DataRoom | None:
     if round_ is None:
         return None
     dataset: Dataset = await build_round_dataset(session, round_id)
+    firm = None if team_id is None else await firm_card(session, round_id, team_id)
     return DataRoom(
         title=dataset.title,
-        brief_markdown=render_team_brief(dataset),
+        brief_markdown=render_team_brief(dataset, firm=firm),
         dictionary_markdown=data_dictionary_markdown(dataset),
         csv_text=to_csv(dataset),
         xlsx_bytes=to_xlsx(dataset),
