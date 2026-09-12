@@ -17,6 +17,7 @@ from pydantic import TypeAdapter
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from config import settings
+from core.cases import supported_methods
 from core.rubric_grader import RubricCriterion, grade_submission
 from db import repositories as repo
 from db import role_repositories as role_repo
@@ -116,6 +117,22 @@ class ResultRow:
     rubric_score: float
 
 
+# Подписи методов для формы препода. Порядок — порядок курса (db.enums.Method).
+# В форму попадают только методы с готовым кейсом: раунд по методу без данных
+# не настраивается (core.cases), и предлагать его в выпадашке нельзя.
+_METHOD_LABELS: dict[Method, str] = {
+    Method.OLS_SIMPLE: "Парная регрессия спроса",
+    Method.OLS_MULTIPLE: "Множественная регрессия и фиктивные переменные",
+    Method.MULTICOLLINEARITY: "Мультиколлинеарность",
+    Method.HETEROSCEDASTICITY: "Гетероскедастичность",
+    Method.AUTOCORRELATION: "Автокорреляция",
+    Method.PANEL_DATA: "Панельные данные",
+}
+METHOD_CHOICES: dict[Method, str] = {
+    method: _METHOD_LABELS[method] for method in supported_methods()
+}
+
+
 async def next_round_number(session: AsyncSession) -> int:
     """Вернуть номер для нового раунда: максимум существующих + 1.
 
@@ -137,23 +154,31 @@ async def create_and_open_round(
     market_mc: float,
     case_narrative: str,
     engine_mode: EngineMode = EngineMode.SYMMETRIC,
+    method: Method = Method.OLS_SIMPLE,
 ) -> Round:
     """Создать раунд (черновик) и сразу открыть его для приёма решений.
 
-    Метод зафиксирован как OLS_SIMPLE — по скоупу MVP у нас один сценарий
-    («Нефть РФ 2013», парная регрессия). Создание идёт через существующий
-    repo.create_round, открытие — через round_service.open_round, чтобы вся
-    смена статусов проходила одним и тем же путём, что и в остальном коде.
+    ``method`` определяет, какая закономерность лежит в данных раунда
+    (core.cases). Метод без готового кейса отклоняется здесь, при создании,
+    а не в момент выгрузки, когда команды уже ждут данные. Создание идёт
+    через существующий repo.create_round, открытие — через
+    round_service.open_round, чтобы вся смена статусов проходила одним и тем
+    же путём, что и в остальном коде.
 
     ``engine_mode`` по умолчанию симметричный — поведение существующих
     раундов не меняется. Асимметричный раунд считается по пофирменным
     издержкам из CompanyGroundTruth (их пишет generate_role_views); без них
     close_round честно откажется закрывать раунд.
     """
+    if method not in METHOD_CHOICES:
+        raise ValueError(
+            f"под метод {method.value} кейса ещё нет; доступны: "
+            f"{', '.join(m.value for m in METHOD_CHOICES)}"
+        )
     round_ = await repo.create_round(
         session,
         number=number,
-        method=Method.OLS_SIMPLE,
+        method=method,
         difficulty=difficulty,
         market_a=market_a,
         market_b=market_b,

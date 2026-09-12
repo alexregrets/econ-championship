@@ -21,6 +21,7 @@ if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
 from dashboard.actions import (  # noqa: E402
+    METHOD_CHOICES,
     ResultRow,
     RoundHistoryRow,
     TeacherSummary,
@@ -91,9 +92,17 @@ def render_rounds_list(rounds: list[Round]) -> None:
 
 def render_create_form(suggested_number: int) -> None:
     """Форма создания раунда: параметры рынка → create + open одним нажатием."""
-    st.subheader("Новый раунд — «Нефть РФ 2013» (парная регрессия)")
+    st.subheader("Новый раунд")
     with st.form("create_round"):
         number = st.number_input("Номер раунда", min_value=1, value=suggested_number)
+        method_label = st.selectbox(
+            "Метод раунда",
+            list(METHOD_CHOICES.values()),
+            help=(
+                "Метод определяет, какая закономерность заложена в данные "
+                "раунда. В списке только методы с готовым кейсом."
+            ),
+        )
         difficulty = st.number_input("Сложность (1–6)", min_value=1, max_value=6, value=1)
         market_a = st.number_input("a — точка насыщения спроса", min_value=0.1, value=100.0)
         market_b = st.number_input("b — наклон спроса", min_value=0.001, value=1.0)
@@ -109,7 +118,8 @@ def render_create_form(suggested_number: int) -> None:
         )
         narrative = st.text_area(
             "Условие кейса",
-            value="Нефть РФ 2013: оцените спрос парной регрессией и выберите объём добычи.",
+            value="",
+            help="Необязательно: брифинг команде собирается по методу раунда сам.",
         )
         submitted = st.form_submit_button("Создать и открыть")
     if submitted:
@@ -119,6 +129,7 @@ def render_create_form(suggested_number: int) -> None:
         engine_mode = next(
             mode for mode, label in _ENGINE_LABELS.items() if label == engine_label
         )
+        method = next(m for m, label in METHOD_CHOICES.items() if label == method_label)
         round_ = run_db(
             partial(
                 create_and_open_round,
@@ -129,6 +140,7 @@ def render_create_form(suggested_number: int) -> None:
                 market_mc=float(market_mc),
                 case_narrative=narrative,
                 engine_mode=engine_mode,
+                method=method,
             )
         )
         st.success(f"Раунд №{round_.number} создан и открыт (id={round_.id}).")

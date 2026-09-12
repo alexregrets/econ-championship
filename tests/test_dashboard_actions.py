@@ -329,3 +329,56 @@ async def test_grade_rerun_overwrites_scores(session: AsyncSession) -> None:
 
     rows = await grade_round_reasoning(session, round_id, _FakeGradingLLM(set()))
     assert all(row.rubric_score == 0.0 for row in rows)
+
+
+# --------------------------------------------------------------------------- #
+# Метод раунда выбирается в форме, а не зашит в OLS_SIMPLE
+# --------------------------------------------------------------------------- #
+
+
+async def test_create_and_open_round_persists_chosen_method(
+    session: AsyncSession,
+) -> None:
+    round_ = await create_and_open_round(
+        session,
+        number=2,
+        difficulty=2,
+        market_a=100.0,
+        market_b=1.0,
+        market_mc=10.0,
+        case_narrative="режимный сдвиг",
+        method=Method.OLS_MULTIPLE,
+    )
+    assert round_.method is Method.OLS_MULTIPLE
+    assert round_.status is RoundStatus.OPEN
+
+
+async def test_create_and_open_round_rejects_method_without_case(
+    session: AsyncSession,
+) -> None:
+    """Раунд по методу без кейса не создаётся — падать при создании, а не при
+    выгрузке, когда команды уже ждут данные."""
+    with pytest.raises(ValueError, match="autocorrelation"):
+        await create_and_open_round(
+            session,
+            number=3,
+            difficulty=1,
+            market_a=100.0,
+            market_b=1.0,
+            market_mc=10.0,
+            case_narrative="кейса нет",
+            method=Method.AUTOCORRELATION,
+        )
+    # Черновик с неподдерживаемым методом не должен остаться в базе.
+    assert await repo.list_rounds(session) == []
+
+
+def test_method_choices_are_exactly_supported_cases() -> None:
+    """Форма предлагает ровно те методы, под которые есть данные."""
+    from core.cases import supported_methods
+    from dashboard.actions import METHOD_CHOICES
+
+    assert tuple(METHOD_CHOICES) == supported_methods()
+    for method, label in METHOD_CHOICES.items():
+        assert isinstance(method, Method)
+        assert label and label != method.value
