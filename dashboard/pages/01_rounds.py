@@ -23,6 +23,7 @@ if str(_PROJECT_ROOT) not in sys.path:
 from core.trap import Verdict  # noqa: E402
 from dashboard.actions import (  # noqa: E402
     METHOD_CHOICES,
+    DefenceCard,
     ResultRow,
     ReviewRow,
     RoundHistoryRow,
@@ -30,6 +31,7 @@ from dashboard.actions import (  # noqa: E402
     build_grading_llm,
     close_round_with_results,
     create_and_open_round,
+    defence_draw,
     grade_round_reasoning,
     next_round_number,
     results_table,
@@ -56,9 +58,7 @@ _ENGINE_LABELS: dict[EngineMode, str] = {
 def render_teacher_summary(summary: TeacherSummary) -> None:
     """Короткая сводка явки: кто зашёл через бота и кто уже подал решение."""
     col_teams, col_students, col_decisions = st.columns(3)
-    col_teams.metric(
-        "Команд в игре", f"{summary.teams_joined} из {summary.teams_total}"
-    )
+    col_teams.metric("Команд в игре", f"{summary.teams_joined} из {summary.teams_total}")
     col_students.metric("Студентов привязано", summary.students_joined)
     if summary.open_round_number is not None:
         col_decisions.metric(
@@ -130,9 +130,7 @@ def render_create_form(suggested_number: int) -> None:
         if market_mc >= market_a:
             st.error("mc должен быть строго меньше a — иначе рынок нежизнеспособен.")
             return
-        engine_mode = next(
-            mode for mode, label in _ENGINE_LABELS.items() if label == engine_label
-        )
+        engine_mode = next(mode for mode, label in _ENGINE_LABELS.items() if label == engine_label)
         method = next(m for m, label in METHOD_CHOICES.items() if label == method_label)
         round_ = run_db(
             partial(
@@ -233,15 +231,55 @@ def render_result_charts(rows: list[ResultRow], round_number: int) -> None:
     col_market, col_rubric = st.columns(2)
     with col_market:
         st.markdown(f"**Раунд №{round_number}: market score (прибыль)**")
-        st.bar_chart(
-            pd.DataFrame({"прибыль": [r.market_score for r in rows]}, index=labels)
-        )
+        st.bar_chart(pd.DataFrame({"прибыль": [r.market_score for r in rows]}, index=labels))
     with col_rubric:
         st.markdown(f"**Раунд №{round_number}: rubric score (0–1)**")
-        st.bar_chart(
-            pd.DataFrame({"rubric": [r.rubric_score for r in rows]}, index=labels)
-        )
+        st.bar_chart(pd.DataFrame({"rubric": [r.rubric_score for r in rows]}, index=labels))
 
+
+_ROLE_TITLES: dict[str, str] = {
+    "marketer": "маркетолог",
+    "sales_analyst": "аналитик продаж",
+    "financier": "финансист",
+}
+
+
+def render_defence(round_: Round) -> None:
+    """Устная микрозащита: одна команда, одна роль, один вопрос по методу.
+
+    Розыгрыш детерминирован от раунда — повторное нажатие даёт то же имя.
+    «Перетянуть» — если команда не явилась: вторая жеребьёвка тоже
+    воспроизводима. Ожидаемый ответ виден только здесь, у преподавателя.
+    """
+    assert round_.id is not None
+    key = f"defence_attempt_{round_.id}"
+    attempt = int(st.session_state.get(key, 0))
+    col_draw, col_redraw = st.columns(2)
+    if col_draw.button(
+        f"Микрозащита: кого спрашиваем (раунд №{round_.number})", key=f"defence_{round_.id}"
+    ):
+        st.session_state[key] = 0
+        attempt = 0
+        st.session_state[f"defence_show_{round_.id}"] = True
+    if col_redraw.button("Перетянуть (команда не явилась)", key=f"redraw_{round_.id}"):
+        attempt += 1
+        st.session_state[key] = attempt
+        st.session_state[f"defence_show_{round_.id}"] = True
+    if not st.session_state.get(f"defence_show_{round_.id}"):
+        return
+
+    card: DefenceCard | None = run_db(partial(defence_draw, round_id=round_.id, attempt=attempt))
+    if card is None:
+        st.info("Разыгрывать некого — в раунде нет решений.")
+        return
+    st.markdown(
+        f"**Отвечает:** {card.team_name} ({card.company_name}) — "
+        f"{_ROLE_TITLES.get(card.role.value, card.role.value)}"
+        + (f" · перетяжка №{card.attempt}" if card.attempt else "")
+    )
+    st.markdown(f"**Вопрос:** {card.question.text}")
+    with st.expander("Что должно прозвучать в ответе (только преподавателю)"):
+        st.markdown(card.question.expected)
 
 
 _VERDICT_LABELS: dict[Verdict, str] = {
@@ -375,6 +413,7 @@ def main() -> None:
             render_results(rows)
             render_result_charts(rows, round_.number)
             render_review_panel(round_)
+            render_defence(round_)
 
     render_history(run_db(rounds_history))
 

@@ -19,6 +19,7 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 from config import settings
 from core.beliefs import recover_beliefs
 from core.cases import supported_methods
+from core.defence import DefenceDraw, DefenceQuestion, draw_defence
 from core.market_engine import MarketParameters
 from core.market_events import apply_to_costs, apply_to_demand
 from core.rubric_grader import RubricCriterion, grade_submission
@@ -351,6 +352,49 @@ async def review_panel(session: AsyncSession, round_id: int) -> list[ReviewRow] 
         )
     rows.sort(key=lambda r: r.profit_gap, reverse=True)
     return rows
+
+
+@dataclass(frozen=True)
+class DefenceCard:
+    """Жеребьёвка микрозащиты для страницы препода: имя команды, роль, вопрос."""
+
+    team_name: str
+    company_name: str
+    role: Role
+    question: DefenceQuestion
+    attempt: int
+
+
+async def defence_draw(
+    session: AsyncSession, round_id: int, *, attempt: int = 0
+) -> DefenceCard | None:
+    """Кого спрашиваем после закрытия раунда. ``None`` — раунд не закрыт.
+
+    Разыгрываются только команды, подавшие решение: спрашивать тех, кто не
+    играл, не о чем. Розыгрыш детерминирован (`core.defence`), поэтому
+    кнопку можно нажимать сколько угодно — имя не поменяется; перетяжка —
+    только явным ``attempt``.
+    """
+    round_ = await repo.get_round(session, round_id)
+    if round_ is None or round_.status is not RoundStatus.CLOSED:
+        return None
+    decisions = await repo.list_decisions_for_round(session, round_id)
+    if not decisions:
+        return None
+    draw: DefenceDraw = draw_defence(
+        round_id,
+        round_.method,
+        [str(d.team_id) for d in decisions],
+        attempt=attempt,
+    )
+    team = await repo.get_team(session, int(draw.team_id))
+    return DefenceCard(
+        team_name=team.name if team is not None else f"team {draw.team_id}",
+        company_name=team.company_name if team is not None else "",
+        role=draw.role,
+        question=draw.question,
+        attempt=attempt,
+    )
 
 
 # --------------------------------------------------------------------------- #

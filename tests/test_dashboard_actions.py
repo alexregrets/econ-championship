@@ -499,3 +499,27 @@ async def test_ensure_rubric_still_refuses_method_without_default(
 
     with pytest.raises(ValueError, match="autocorrelation"):
         await ensure_rubric_for_method(session, Method.AUTOCORRELATION)
+
+
+async def test_defence_draw_only_after_close_and_only_among_deciders(
+    session: AsyncSession,
+) -> None:
+    from dashboard.actions import defence_draw
+
+    round_id, team_ids = await _regime_round_with_three_teams(session)
+    # Решение подала только одна команда — её и разыгрываем.
+    await submit_manual_decision(
+        session, team_id=team_ids[1], round_id=round_id, quantity=22.5, reasoning=""
+    )
+    assert await defence_draw(session, round_id) is None  # раунд ещё открыт
+    await close_round_with_results(session, round_id)
+
+    card = await defence_draw(session, round_id)
+    assert card is not None
+    assert card.team_name == "T1"
+    assert card.question.text
+    # Повторный вызов — та же карточка; перетяжка — воспроизводима.
+    assert await defence_draw(session, round_id) == card
+    redraw = await defence_draw(session, round_id, attempt=1)
+    assert redraw is not None and redraw.attempt == 1
+    assert redraw == await defence_draw(session, round_id, attempt=1)
