@@ -12,10 +12,13 @@ from __future__ import annotations
 
 import streamlit as st
 
+from dashboard.auth import require_teacher
+
 
 def main() -> None:
     """Отрисовать домашнюю страницу с краткой справкой по дашборду."""
     st.set_page_config(page_title="Econ Championship — дашборд", page_icon="📈")
+    require_teacher()
     st.title("Эконометрический турнир — дашборд профессора")
     st.markdown(
         "Управление раундами — на странице **Раунды** в меню слева:\n"

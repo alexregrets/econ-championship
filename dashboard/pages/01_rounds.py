@@ -38,6 +38,7 @@ from dashboard.actions import (  # noqa: E402
     submit_manual_decision,
     teacher_summary,
 )
+from dashboard.auth import require_teacher  # noqa: E402
 from dashboard.db_runner import run_db  # noqa: E402
 from db import repositories as repo  # noqa: E402
 from db.enums import EngineMode, RoundStatus  # noqa: E402
@@ -336,6 +337,7 @@ def render_history(history: list[RoundHistoryRow]) -> None:
 def main() -> None:
     """Собрать страницу: список раундов, форма создания, работа с открытым раундом."""
     st.set_page_config(page_title="Раунды", page_icon="🏁")
+    require_teacher()
     st.title("Управление раундами")
 
     rounds = run_db(repo.list_rounds)

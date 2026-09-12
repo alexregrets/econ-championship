@@ -28,6 +28,9 @@ class Settings(BaseSettings):
     bot_token: str = ""
     groq_api_key: str = ""
     database_url: str = "sqlite+aiosqlite:///./econ_tournament.db"
+    # Пароль на страницы преподавателя (dashboard/auth.py). Пустой — страницы
+    # открыты всем, о чём дашборд предупреждает на каждой из них.
+    dashboard_password: str = ""
 
 
 settings = Settings()
