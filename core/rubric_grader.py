@@ -103,6 +103,8 @@ async def grade_submission(
     student_reasoning: str,
     rubric: Sequence[RubricCriterion],
     llm: StructuredLLM,
+    *,
+    reference_notes: str = "",
 ) -> GradingResult:
     """Grade a student's reasoning against a question-specific rubric.
 
@@ -114,6 +116,9 @@ async def grade_submission(
         The criteria to evaluate against.
     llm:
         Any :class:`~llm.base.StructuredLLM` implementation.
+    reference_notes:
+        Instructor-only facts about the round (see
+        :func:`llm.prompts.grading.build_grading_user_prompt`).
 
     Returns
     -------
@@ -135,7 +140,7 @@ async def grade_submission(
     if not rubric:
         raise ValueError("rubric must contain at least one criterion")
 
-    user_prompt = build_grading_user_prompt(student_reasoning, rubric)
+    user_prompt = build_grading_user_prompt(student_reasoning, rubric, reference_notes)
     response = await llm.structured_completion(
         GRADING_SYSTEM_PROMPT,
         user_prompt,

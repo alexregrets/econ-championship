@@ -479,3 +479,23 @@ async def test_review_panel_no_trap_for_simple_regression(session: AsyncSession)
     # Монополист на Нэше: наклон истинный, разрывы нулевые.
     assert rows[0].implied_slope == pytest.approx(1.0)
     assert rows[0].profit_gap == pytest.approx(0.0, abs=1e-9)
+
+
+async def test_ensure_rubric_seeds_default_for_regime_shift(session: AsyncSession) -> None:
+    """Раунд по режимному сдвигу оценивается без ручного шаблона —
+    рубрика по умолчанию заводится из core.rubrics и сохраняется."""
+    from dashboard.actions import ensure_rubric_for_method
+
+    rubric = await ensure_rubric_for_method(session, Method.OLS_MULTIPLE)
+    assert any(c.id == "pooled_trap_named" for c in rubric)
+    template = await repo.get_rubric_for_method(session, Method.OLS_MULTIPLE)
+    assert template is not None
+
+
+async def test_ensure_rubric_still_refuses_method_without_default(
+    session: AsyncSession,
+) -> None:
+    from dashboard.actions import ensure_rubric_for_method
+
+    with pytest.raises(ValueError, match="autocorrelation"):
+        await ensure_rubric_for_method(session, Method.AUTOCORRELATION)

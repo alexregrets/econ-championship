@@ -22,6 +22,7 @@ from core.cases import supported_methods
 from core.market_engine import MarketParameters
 from core.market_events import apply_to_costs, apply_to_demand
 from core.rubric_grader import RubricCriterion, grade_submission
+from core.rubrics import DEFAULT_RUBRICS, rubric_for_method
 from core.trap import Verdict, naive_slope_ratio, trap_verdict
 from db import repositories as repo
 from db import role_repositories as role_repo
@@ -46,7 +47,6 @@ from services.round_service import (
 )
 
 __all__ = [
-    "DEFAULT_OLS_SIMPLE_RUBRIC",
     "ResultRow",
     "next_round_number",
     "create_and_open_round",
@@ -78,41 +78,6 @@ __all__ = [
 # Пилотная рубрика для парной регрессии: используется, если профессор ещё не
 # завёл свой RubricTemplate для метода. Веса в сумме дают 1.0, но грейдер
 # нормирует на сумму весов сам, так что это не жёсткое требование.
-DEFAULT_OLS_SIMPLE_RUBRIC: list[RubricCriterion] = [
-    RubricCriterion(
-        id="specification",
-        description=(
-            "Указана спецификация парной регрессии: что зависимая переменная, "
-            "что объясняющая (например, спрос от цены)."
-        ),
-        weight=0.3,
-    ),
-    RubricCriterion(
-        id="interpretation",
-        description=(
-            "Коэффициент наклона интерпретирован по знаку и смыслу "
-            "(как изменение фактора влияет на спрос/цену)."
-        ),
-        weight=0.3,
-    ),
-    RubricCriterion(
-        id="quantity_link",
-        description=(
-            "Выбранный объём Q обоснован оценкой спроса или ожидаемой цены, "
-            "а не назван произвольно."
-        ),
-        weight=0.3,
-    ),
-    RubricCriterion(
-        id="fit_check",
-        description=(
-            "Упомянута проверка качества модели: R², значимость коэффициентов "
-            "или анализ остатков."
-        ),
-        weight=0.1,
-    ),
-]
-
 _CRITERIA_ADAPTER: TypeAdapter[list[RubricCriterion]] = TypeAdapter(
     list[RubricCriterion]
 )
@@ -852,37 +817,64 @@ def build_grading_llm() -> StructuredLLM:
 async def ensure_rubric_for_method(
     session: AsyncSession, method: Method
 ) -> list[RubricCriterion]:
-    """Вернуть рубрику метода; для OLS_SIMPLE без шаблона — завести пилотную.
+    """Вернуть рубрику метода; без шаблона в базе — завести из `core.rubrics`.
 
-    Читает RubricTemplate через существующий репозиторий. Если шаблона нет и
-    метод — парная регрессия (наш единственный сценарий), пилотная рубрика
-    сохраняется в БД через upsert_rubric_template: профессор потом сможет её
-    поправить, а повторные оценки будут читать уже сохранённую версию.
+    Читает RubricTemplate через существующий репозиторий. Если шаблона нет,
+    рубрика по умолчанию сохраняется через upsert_rubric_template: профессор
+    потом сможет её поправить, а повторные оценки будут читать сохранённую
+    версию.
 
     Raises
     ------
     ValueError
-        Если шаблона нет и метод не OLS_SIMPLE (рубрики других методов —
-        вне скоупа, молча выдумывать их нельзя).
+        Если шаблона нет и под метод нет рубрики по умолчанию — выдумывать
+        её на ходу нельзя.
     """
     template = await repo.get_rubric_for_method(session, method)
     if template is not None:
         return _CRITERIA_ADAPTER.validate_json(template.criteria_json)
-    if method is not Method.OLS_SIMPLE:
+    if method not in DEFAULT_RUBRICS:
         raise ValueError(
             f"для метода {method.value} не задана рубрика — заведите "
             "RubricTemplate прежде чем оценивать"
         )
-    criteria_json = _CRITERIA_ADAPTER.dump_json(DEFAULT_OLS_SIMPLE_RUBRIC).decode(
-        "utf-8"
-    )
+    rubric = rubric_for_method(method)
+    criteria_json = _CRITERIA_ADAPTER.dump_json(rubric).decode("utf-8")
     await repo.upsert_rubric_template(
         session,
         method=method,
-        name="Парная регрессия — пилотная рубрика",
+        name=f"{_METHOD_LABELS[method]} — рубрика по умолчанию",
         criteria_json=criteria_json,
     )
-    return list(DEFAULT_OLS_SIMPLE_RUBRIC)
+    return rubric
+
+
+def grading_reference_notes(round_: Round, *, n_firms: int) -> str:
+    """Справка грейдеру: истинные числа раунда, чтобы судить названные.
+
+    Идёт в промпт Groq, студенту не показывается. Без неё критерий «наклон
+    назван числом» закрывается любым числом; с ней грейдер сверяет
+    названное с истиной и наивной оценкой. Наивная оценка — та, что даёт
+    ловушка метода (`core.trap`); где ловушки нет, строка не пишется.
+    """
+    n = max(n_firms, 1)
+    nash_q = (round_.market_a - round_.market_mc) / (round_.market_b * (n + 1))
+    nash_price = round_.market_a - round_.market_b * nash_q * n
+    lines = [
+        f"- True demand line: P = {round_.market_a:g} - {round_.market_b:g} * Q "
+        "(Q = total market output).",
+        f"- True slope b = {round_.market_b:g}; marginal cost c = {round_.market_mc:g}.",
+        f"- Firms on the market: {n}. Symmetric Nash: q_i ≈ {nash_q:.2f}, "
+        f"price ≈ {nash_price:.2f}.",
+    ]
+    ratio = naive_slope_ratio(round_.method)
+    if ratio is not None:
+        lines.append(
+            f"- Naive pooled regression on this dataset recovers slope ≈ "
+            f"{ratio * round_.market_b:g} ({ratio:.0%} of the truth) — a student "
+            "naming a slope near this value fell into the trap."
+        )
+    return "\n".join(lines)
 
 
 async def grade_round_reasoning(
@@ -924,6 +916,7 @@ async def grade_round_reasoning(
         raise ValueError(f"round {round_id} has no decisions to grade")
 
     rubric = await ensure_rubric_for_method(session, round_.method)
+    notes = grading_reference_notes(round_, n_firms=len(await repo.list_teams(session)))
 
     for decision in decisions:
         assert decision.id is not None  # прочитан из БД
@@ -933,7 +926,9 @@ async def grade_round_reasoning(
                 f"decision {decision.id} has no market result — закройте "
                 "раунд через дашборд, чтобы результаты посчитались"
             )
-        grading = await grade_submission(decision.reasoning, rubric, llm)
+        grading = await grade_submission(
+            decision.reasoning, rubric, llm, reference_notes=notes
+        )
         await repo.save_result(
             session,
             decision_id=decision.id,

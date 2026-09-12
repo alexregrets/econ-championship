@@ -38,6 +38,7 @@ GRADING_SYSTEM_PROMPT = (
 def build_grading_user_prompt(
     student_reasoning: str,
     rubric: Sequence[RubricCriterion],
+    reference_notes: str = "",
 ) -> str:
     """Render the user prompt listing the rubric criteria and the student's text.
 
@@ -47,6 +48,10 @@ def build_grading_user_prompt(
         The student's submitted justification.
     rubric:
         The criteria to grade against.
+    reference_notes:
+        Ground-truth facts about the round the grader may use to judge whether
+        a number the student names is plausible (true slope, cost, naive
+        estimate). Never shown to students; empty string disables the block.
 
     Returns
     -------
@@ -58,6 +63,15 @@ def build_grading_user_prompt(
     for criterion in rubric:
         lines.append(f"- id={criterion.id!r}: {criterion.description}")
     lines.append("")
+    if reference_notes.strip():
+        lines.append(
+            "Reference facts about this round (known only to the instructor; use "
+            "them to judge whether numbers the student names are plausible — a "
+            "number off by more than ~30% from the reference does not satisfy a "
+            "criterion that asks for a numeric estimate):"
+        )
+        lines.append(reference_notes.strip())
+        lines.append("")
     lines.append("Student reasoning:")
     lines.append('"""')
     lines.append(student_reasoning.strip())
