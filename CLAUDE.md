@@ -1,9 +1,49 @@
-# CLAUDE.md
+# CLAUDE.md — Econometrics Championship
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+Турнир по Курно для курса эконометрики Кудрявцева. Команды-фирмы подают объём,
+движок считает равновесие, студенты делают регрессии на данных, которые сами
+породили. Публичный репозиторий `alexregrets/econ-championship`, ветка `master`.
 
-## Project
+## Команды
 
-This repository is for the **Econometrics Championship** — a competition project. The codebase is currently being initialized.
+```bash
+uv sync                                   # Python 3.12 + зависимости
+uv run pytest -q                          # всё зелёное — среда исправна
+uv run ruff check . && uv run mypy .      # линт и типы обязаны быть чистыми
+uv run python -m devshell.seed            # команды + открытый раунд (пересоздаёт базу)
+uv run python -m devshell.demo_round      # база для показа: сыгранный раунд с разбором
+uv run streamlit run dashboard/app.py     # дашборд препода + витрина
+uv run python -m bot.main                 # Telegram-бот
+```
 
-Update this file once the project structure, tech stack, and build/run commands are established.
+`.env` из `.env.example`: `BOT_TOKEN`, `GROQ_API_KEY`, `DASHBOARD_PASSWORD`.
+
+## Слои
+
+`core/` — чистая математика, стандартная библиотека, без I/O и случайности:
+движки Курно, кейсы под метод (`cases`), обратный ход (`beliefs`), детектор
+«кто попался» (`trap`), рубрики (`rubrics`), микрозащита (`defence`).
+`db/` — SQLModel + aiosqlite, без миграций (гейт Alembic — до первой новой
+таблицы). `services/` — жизненный цикл раунда, выгрузка, брифинг.
+`dashboard/` — Streamlit; `actions.py` — общий слой действий для страниц и
+бота. `bot/` — aiogram. `devshell/` — сидеры и демо.
+
+## Правила
+
+- **`core/` не вайб-кодится**: инвариант-тест первым, код вторым. Правдоподобно
+  неверная формула от верной на глаз неотличима.
+- Существующий тест не правится ради зелёного. Считаешь неверным — оставь
+  красным и напиши об этом.
+- Коммит после каждого зелёного прогона **всего** `uv run pytest -q`, с числом
+  тестов в отчёте; сразу `git push origin master`.
+- Всё, что видит студент, проходит проверку «а не подглядел ли он истину»:
+  `FORBIDDEN_COLUMNS`, тесты на утечку в брифинге и выгрузке.
+- Живой прогон на чистой базе ловит то, чего не видят тесты — делать перед
+  тем, как объявлять «готово» (12.09: четыре бага из четырёх найдены прогоном).
+
+## Документы — источник правды
+
+`STATE.md` (состояние, шаги) · `LOOP_LOG.md` (журнал итераций, что пробовали и
+чем кончилось) · `PRODUCT_REVIEW.md` (ревизия путей и открытые решения) ·
+`DECISIONS.md` · `CASES.md` (шесть кейсов) · `GAME_DESIGN.md` · `DEPLOYMENT.md`.
+Протокол автономной работы — `LOOP_PROMPT.md`.
