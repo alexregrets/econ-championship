@@ -11,9 +11,16 @@ from __future__ import annotations
 
 from aiogram import Router
 from aiogram.filters import Command, CommandObject, CommandStart
-from aiogram.types import Message
+from aiogram.types import BufferedInputFile, Message
 
-from bot.service import join_team, submit_decision, team_status
+from bot.service import (
+    brief_as_plain_text,
+    join_team,
+    submit_decision,
+    team_brief,
+    team_result,
+    team_status,
+)
 from db.session import get_session_ctx
 
 __all__ = ["router"]
@@ -24,8 +31,11 @@ _START_TEXT = (
     "Это бот чемпионата по эконометрике.\n\n"
     "Команды:\n"
     "/join <код> — вступить в свою команду (код выдаёт преподаватель)\n"
+    "/brief — брифинг открытого раунда: рынок, задача, издержки вашей фирмы\n"
+    "/data — данные раунда файлом (CSV) и словарь переменных\n"
     "/submit <Q> <обоснование> — подать решение команды в открытый раунд\n"
-    "/status — команда, открытый раунд и поданное решение\n\n"
+    "/status — команда, открытый раунд и поданное решение\n"
+    "/result — разбор последнего закрытого раунда: что ждали, что получили\n\n"
     "Пока раунд открыт, /submit можно повторять — учитывается последнее."
 )
 
@@ -142,3 +152,82 @@ async def cmd_status(message: Message) -> None:
                 f"(можно заменить повторным /submit)."
             )
     await message.answer("\n".join(lines))
+
+
+@router.message(Command("brief"))
+async def cmd_brief(message: Message) -> None:
+    """Брифинг открытого раунда с карточкой фирмы — текстом, без файлов."""
+    user = message.from_user
+    if user is None:
+        return
+    async with get_session_ctx() as session:
+        try:
+            outcome = await team_brief(session, telegram_id=user.id)
+        except ValueError as exc:
+            await message.answer(str(exc))
+            return
+    text = brief_as_plain_text(outcome.room.brief_markdown)
+    await message.answer(text + "\n\nДанные файлом: /data")
+
+
+@router.message(Command("data"))
+async def cmd_data(message: Message) -> None:
+    """Данные открытого раунда файлом: CSV и словарь переменных."""
+    user = message.from_user
+    if user is None:
+        return
+    async with get_session_ctx() as session:
+        try:
+            outcome = await team_brief(session, telegram_id=user.id)
+        except ValueError as exc:
+            await message.answer(str(exc))
+            return
+    room = outcome.room
+    await message.answer_document(
+        BufferedInputFile(
+            room.csv_text.encode("utf-8"), filename=f"{room.filename_stem}.csv"
+        ),
+        caption=(
+            f"Раунд №{outcome.round.number}: {room.observations} наблюдений. "
+            "Словарь переменных — вторым файлом; брифинг — /brief."
+        ),
+    )
+    await message.answer_document(
+        BufferedInputFile(
+            room.dictionary_markdown.encode("utf-8"),
+            filename=f"{room.filename_stem}_dictionary.md",
+        )
+    )
+
+
+@router.message(Command("result"))
+async def cmd_result(message: Message) -> None:
+    """Разбор последнего закрытого раунда команды."""
+    user = message.from_user
+    if user is None:
+        return
+    async with get_session_ctx() as session:
+        try:
+            r = await team_result(session, telegram_id=user.id)
+        except ValueError as exc:
+            await message.answer(str(exc))
+            return
+    gap_line = (
+        "Вы взяли максимум, который давал этот выпуск соперников."
+        if r.profit_gap <= 1e-9
+        else (
+            f"Лучший ответ на фактический выпуск соперников: Q = "
+            f"{r.best_response_quantity:.2f} → прибыль {r.best_response_profit:.1f}. "
+            f"Недобор: {r.profit_gap:.1f}."
+        )
+    )
+    await message.answer(
+        f"Раунд №{r.round.number} закрыт — «{r.team.name}» ({r.team.company_name}).\n"
+        f"Вы подали Q = {r.quantity:.2f}. Цена рынка: {r.actual_price:.2f}. "
+        f"Прибыль: {r.profit:.1f}.\n"
+        f"Вы действовали так, будто ждали цену {r.expected_price:.2f}; рынок дал "
+        f"{r.actual_price:.2f}.\n"
+        f"{gap_line}\n"
+        f"Место по прибыли раунда: {r.rank} из {r.teams_scored}. "
+        f"Накопленная прибыль: {r.cumulative_profit:.1f}."
+    )

@@ -306,3 +306,73 @@ async def test_status_shows_submitted_decision(session: AsyncSession) -> None:
     assert status.open_round is not None
     assert status.decision is not None
     assert status.decision.quantity == pytest.approx(120.0)
+
+
+# --------------------------------------------------------------------------- #
+# /brief, /data, /result — путь студента без витрины
+# --------------------------------------------------------------------------- #
+
+
+async def test_team_brief_returns_room_with_firm_cost(session: AsyncSession) -> None:
+    from bot.service import brief_as_plain_text, team_brief
+
+    team, code = await _seed_team(session)
+    await join_team(session, telegram_id=1, full_name="A", code=code)
+    await repo.create_round(
+        session,
+        number=1,
+        method=Method.OLS_SIMPLE,
+        difficulty=1,
+        market_a=100.0,
+        market_b=1.0,
+        market_mc=12.5,
+        status=RoundStatus.OPEN,
+    )
+    outcome = await team_brief(session, telegram_id=1)
+    assert outcome.team.id == team.id
+    assert "12.5" in outcome.room.brief_markdown
+    assert outcome.room.csv_text.startswith("period,quantity,price")
+    plain = brief_as_plain_text(outcome.room.brief_markdown)
+    assert "|" not in plain and "#" not in plain and "**" not in plain
+    assert "12.5" in plain and "ВАША ФИРМА" in plain
+
+
+async def test_team_brief_without_open_round_raises(session: AsyncSession) -> None:
+    from bot.service import team_brief
+
+    _, code = await _seed_team(session)
+    await join_team(session, telegram_id=1, full_name="A", code=code)
+    with pytest.raises(ValueError, match="нет открытого раунда"):
+        await team_brief(session, telegram_id=1)
+
+
+async def test_team_result_after_close_hides_truth(session: AsyncSession) -> None:
+    from bot.service import team_result
+    from dashboard.actions import close_round_with_results, create_and_open_round
+
+    team, code = await _seed_team(session)
+    await join_team(session, telegram_id=1, full_name="A", code=code)
+    with pytest.raises(ValueError, match="ещё нет"):
+        await team_result(session, telegram_id=1)
+
+    round_ = await create_and_open_round(
+        session,
+        number=1,
+        difficulty=1,
+        market_a=100.0,
+        market_b=1.0,
+        market_mc=10.0,
+        case_narrative="",
+    )
+    assert round_.id is not None
+    await submit_decision(session, telegram_id=1, quantity=45.0, reasoning="Нэш")
+    await close_round_with_results(session, round_.id)
+
+    r = await team_result(session, telegram_id=1)
+    # Монополист на Нэше: q = 45, P = 55, прибыль 2025, недобор 0, место 1 из 1.
+    assert r.quantity == 45.0
+    assert r.actual_price == pytest.approx(55.0)
+    assert r.profit == pytest.approx(2025.0)
+    assert r.profit_gap == pytest.approx(0.0, abs=1e-9)
+    assert r.rank == 1 and r.teams_scored == 1
+    assert not hasattr(r, "true_slope") and not hasattr(r, "verdict")

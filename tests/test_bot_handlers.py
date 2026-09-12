@@ -244,3 +244,51 @@ async def test_status_after_submit_shows_decision(
     text = last_reply(message)
     assert "Раунд" in text or "раунд" in text
     assert "120" in text
+
+
+# --------------------------------------------------------------------------- #
+# /brief, /data, /result
+# --------------------------------------------------------------------------- #
+
+
+async def test_brief_requires_join(session_ctx: SessionFactory) -> None:
+    message = make_message()
+    await handlers.cmd_brief(cast(Message, message))
+    assert "/join" in last_reply(message)
+
+
+async def test_brief_and_data_deliver_round_materials(
+    session_ctx: SessionFactory,
+) -> None:
+    code = await _seed_team_with_code(session_ctx)
+    await _seed_open_round(session_ctx)
+    message = make_message()
+    await handlers.cmd_join(cast(Message, message), _command("join", code))
+
+    await handlers.cmd_brief(cast(Message, message))
+    reply = last_reply(message)
+    assert "ВАША ФИРМА" in reply and "/data" in reply
+    assert len(reply) <= 4096, "Telegram режет сообщения длиннее 4096"
+
+    message.answer_document = AsyncMock()
+    await handlers.cmd_data(cast(Message, message))
+    assert message.answer_document.await_count == 2
+    first = message.answer_document.await_args_list[0]
+    assert first.args[0].filename.endswith(".csv")
+    assert "наблюдений" in first.kwargs["caption"]
+
+
+async def test_result_before_any_close_explains(session_ctx: SessionFactory) -> None:
+    code = await _seed_team_with_code(session_ctx)
+    message = make_message()
+    await handlers.cmd_join(cast(Message, message), _command("join", code))
+    await handlers.cmd_result(cast(Message, message))
+    assert "ещё нет" in last_reply(message)
+
+
+async def test_start_lists_new_commands(session_ctx: SessionFactory) -> None:
+    message = make_message()
+    await handlers.cmd_start(cast(Message, message))
+    reply = last_reply(message)
+    for cmd in ("/brief", "/data", "/result"):
+        assert cmd in reply
