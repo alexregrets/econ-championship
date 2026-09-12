@@ -92,6 +92,7 @@ class ResultOutcome:
     rank: int
     teams_scored: int
     cumulative_profit: float
+    br_share: float
 
 
 @dataclass(frozen=True)
@@ -123,21 +124,15 @@ async def join_team(
         raise ValueError("Код пустой. Использование: /join <код команды>")
     team = await bot_repo.get_team_by_join_code(session, normalized)
     if team is None:
-        raise ValueError(
-            "Код команды не найден. Проверьте код у капитана или преподавателя."
-        )
+        raise ValueError("Код команды не найден. Проверьте код у капитана или преподавателя.")
     assert team.id is not None  # прочитана из БД
 
     student = await repo.get_student_by_telegram_id(session, telegram_id)
     created = student is None
     if student is None:
-        student = await repo.create_student(
-            session, telegram_id=telegram_id, full_name=full_name
-        )
+        student = await repo.create_student(session, telegram_id=telegram_id, full_name=full_name)
     assert student.id is not None
-    await bot_repo.bind_student_to_team(
-        session, student_id=student.id, team_id=team.id
-    )
+    await bot_repo.bind_student_to_team(session, student_id=student.id, team_id=team.id)
     return JoinOutcome(team=team, created_student=created)
 
 
@@ -145,14 +140,11 @@ async def _require_team(session: AsyncSession, telegram_id: int) -> Team:
     """Вернуть команду студента или объяснить, что сначала нужен /join."""
     student = await repo.get_student_by_telegram_id(session, telegram_id)
     if student is None or student.team_id is None:
-        raise ValueError(
-            "Вы ещё не в команде. Сначала вступите: /join <код команды>."
-        )
+        raise ValueError("Вы ещё не в команде. Сначала вступите: /join <код команды>.")
     team = await repo.get_team(session, student.team_id)
     if team is None:
         raise ValueError(
-            "Ваша команда не найдена (база пересоздавалась?). "
-            "Вступите заново: /join <код команды>."
+            "Ваша команда не найдена (база пересоздавалась?). Вступите заново: /join <код команды>."
         )
     return team
 
@@ -177,9 +169,7 @@ async def submit_decision(
     assert team.id is not None
 
     if not math.isfinite(quantity) or quantity < 0:
-        raise ValueError(
-            f"Объём Q должен быть неотрицательным числом, получено: {quantity}."
-        )
+        raise ValueError(f"Объём Q должен быть неотрицательным числом, получено: {quantity}.")
     if not reasoning.strip():
         raise ValueError(
             "Нужно обоснование: /submit <Q> <текст>. Его оценивает рубрика — "
@@ -189,14 +179,11 @@ async def submit_decision(
     round_ = await repo.get_open_round(session)
     if round_ is None:
         raise ValueError(
-            "Сейчас нет открытого раунда — подождите, когда преподаватель "
-            "откроет следующий."
+            "Сейчас нет открытого раунда — подождите, когда преподаватель откроет следующий."
         )
     assert round_.id is not None
 
-    existing = await repo.get_decision(
-        session, team_id=team.id, round_id=round_.id
-    )
+    existing = await repo.get_decision(session, team_id=team.id, round_id=round_.id)
     decision = await submit_manual_decision(
         session,
         team_id=team.id,
@@ -204,9 +191,7 @@ async def submit_decision(
         quantity=quantity,
         reasoning=reasoning,
     )
-    return SubmitOutcome(
-        round=round_, team=team, decision=decision, replaced=existing is not None
-    )
+    return SubmitOutcome(round=round_, team=team, decision=decision, replaced=existing is not None)
 
 
 async def team_brief(session: AsyncSession, *, telegram_id: int) -> BriefOutcome:
@@ -285,9 +270,7 @@ async def team_result(session: AsyncSession, *, telegram_id: int) -> ResultOutco
     """
     team = await _require_team(session, telegram_id)
     assert team.id is not None
-    rounds = [
-        r for r in await repo.list_rounds(session) if r.status is RoundStatus.CLOSED
-    ]
+    rounds = [r for r in await repo.list_rounds(session) if r.status is RoundStatus.CLOSED]
     rounds.sort(key=lambda r: r.number, reverse=True)
     for round_ in rounds:
         assert round_.id is not None
@@ -298,9 +281,11 @@ async def team_result(session: AsyncSession, *, telegram_id: int) -> ResultOutco
         if mine is None:
             continue
         table = await results_table(session, round_.id)
-        rank = next(
-            (i + 1 for i, r in enumerate(table) if r.team_name == team.name), 0
-        )
+        # Место — по оценке раунда (доля от лучшего ответа), не по сырой
+        # прибыли: в Курно перепроизводитель зарабатывает больше тех, кто
+        # считал верно, и по деньгам был бы первым.
+        ordered = sorted(rows, key=lambda r: r.br_share, reverse=True)
+        rank = next((i + 1 for i, r in enumerate(ordered) if r.team_name == team.name), 0)
         return ResultOutcome(
             round=round_,
             team=team,
@@ -314,10 +299,10 @@ async def team_result(session: AsyncSession, *, telegram_id: int) -> ResultOutco
             rank=rank,
             teams_scored=len(table),
             cumulative_profit=team.cumulative_profit,
+            br_share=mine.br_share,
         )
     raise ValueError(
-        "Закрытых раундов с вашим решением ещё нет — разбор появится после "
-        "первого закрытия."
+        "Закрытых раундов с вашим решением ещё нет — разбор появится после первого закрытия."
     )
 
 
@@ -336,7 +321,5 @@ async def team_status(session: AsyncSession, *, telegram_id: int) -> TeamStatus:
     decision: Decision | None = None
     if round_ is not None:
         assert round_.id is not None
-        decision = await repo.get_decision(
-            session, team_id=team.id, round_id=round_.id
-        )
+        decision = await repo.get_decision(session, team_id=team.id, round_id=round_.id)
     return TeamStatus(team=team, open_round=round_, decision=decision)

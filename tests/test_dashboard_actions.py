@@ -424,14 +424,27 @@ async def test_review_panel_hidden_until_round_closed(session: AsyncSession) -> 
 async def test_review_panel_flags_naive_team_and_clears_nash_team(
     session: AsyncSession,
 ) -> None:
-    from core.trap import Verdict
-    from dashboard.actions import review_panel
+    """Наивная команда — та, что сдала объём наивной процедуры на данных
+    раунда; верные — объём верной. Вердикт по объёму, не по b̂ (12.09)."""
+    from core.cases import REGIME_COLUMN
+    from core.trap import Verdict, procedure_quantities
+    from dashboard.actions import build_round_dataset, review_panel
 
     round_id, team_ids = await _regime_round_with_three_teams(session)
-    # Нэш при трёх фирмах: q = (a - c) / (b (n+1)) = 22.5. Две команды играют
-    # Нэш, третья — так, будто наклон 0.35: q = (A_i - c) / (2 · 0.35 · b),
-    # где A_i = a - b · 45 = 55 → q = 45 / 0.7 ≈ 64.29.
-    quantities = {team_ids[0]: 22.5, team_ids[1]: 22.5, team_ids[2]: 45.0 / 0.7}
+    dataset = await build_round_dataset(session, round_id)
+    proc = procedure_quantities(
+        dataset.rows,
+        true_a=100.0,
+        true_b=1.0,
+        marginal_cost=10.0,
+        n_firms=3,
+        regime_column=REGIME_COLUMN,
+    )
+    quantities = {
+        team_ids[0]: proc.sound_quantity,
+        team_ids[1]: proc.sound_quantity,
+        team_ids[2]: proc.naive_quantity,
+    }
     for team_id, q in quantities.items():
         await submit_manual_decision(
             session, team_id=team_id, round_id=round_id, quantity=q, reasoning=""
@@ -442,23 +455,47 @@ async def test_review_panel_flags_naive_team_and_clears_nash_team(
     assert rows is not None
     by_team = {row.team_name: row for row in rows}
     assert by_team["T2"].verdict is Verdict.TRAPPED
-    assert by_team["T2"].implied_slope == pytest.approx(0.35, rel=1e-6)
-    # У Нэш-команд остаточный спрос просел из-за перепроизводства соперника:
-    # A_i = 100 - 22.5 - 64.29 ≈ 13.2, b̂ = (A_i - 10) / 45 ≈ 0.07. Детектор судит по
-    # фактическому Q_-i, а не по ожиданиям команды, поэтому верная игра против
-    # затопившего рынок соперника даёт OFF, не SOUND. Это ограничение метода,
-    # оно названо в панели; здесь фиксируем ровно «не попался».
-    for name in ("T0", "T1"):
-        assert by_team[name].verdict is Verdict.OFF
-        expected_slope = (100.0 - 22.5 - 45.0 / 0.7 - 10.0) / 45.0
-        assert by_team[name].implied_slope == pytest.approx(expected_slope, rel=1e-6)
-    # Наивная команда ждала цену выше фактической и недобрала прибыль.
+    assert by_team["T0"].verdict is Verdict.SOUND
+    assert by_team["T1"].verdict is Verdict.SOUND
+    assert by_team["T2"].naive_quantity == pytest.approx(proc.naive_quantity)
+    assert by_team["T2"].sound_quantity == pytest.approx(proc.sound_quantity)
+    # Наивная перепроизвела: ждала цену выше фактической, недобрала прибыль.
     assert by_team["T2"].price_gap > 0
     assert by_team["T2"].profit_gap > 0
     assert by_team["T2"].true_slope == 1.0
     assert by_team["T2"].naive_slope == pytest.approx(0.35)
-    # Строки отсортированы по разрыву в прибыли — худшие сверху.
+    # Оценка раунда — доля от лучшего ответа: у наивной ниже, она сверху.
+    assert by_team["T2"].br_share < by_team["T0"].br_share
     assert rows[0].team_name == "T2"
+
+
+async def test_raw_profit_would_reward_the_trapped_team(session: AsyncSession) -> None:
+    """Почему оценка — доля от лучшего ответа, а не сырая прибыль: в Курно
+    единственный перепроизводитель зарабатывает больше тех, кто считал верно.
+    Фиксируем факт числом, чтобы правило оценки не «упростили» обратно."""
+    from core.cases import REGIME_COLUMN
+    from core.trap import procedure_quantities
+    from dashboard.actions import build_round_dataset, review_panel
+
+    round_id, team_ids = await _regime_round_with_three_teams(session)
+    dataset = await build_round_dataset(session, round_id)
+    proc = procedure_quantities(
+        dataset.rows,
+        true_a=100.0,
+        true_b=1.0,
+        marginal_cost=10.0,
+        n_firms=3,
+        regime_column=REGIME_COLUMN,
+    )
+    for i, team_id in enumerate(team_ids):
+        q = proc.naive_quantity if i == 2 else proc.sound_quantity
+        await submit_manual_decision(
+            session, team_id=team_id, round_id=round_id, quantity=q, reasoning=""
+        )
+    money = await close_round_with_results(session, round_id)
+    assert money[0].team_name == "T2"  # по деньгам агрессор первый
+    rows = await review_panel(session, round_id)
+    assert rows is not None and rows[0].team_name == "T2"  # по оценке — последний
 
 
 async def test_review_panel_no_trap_for_simple_regression(session: AsyncSession) -> None:

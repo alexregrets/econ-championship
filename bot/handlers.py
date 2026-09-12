@@ -228,6 +228,6 @@ async def cmd_result(message: Message) -> None:
         f"Вы действовали так, будто ждали цену {r.expected_price:.2f}; рынок дал "
         f"{r.actual_price:.2f}.\n"
         f"{gap_line}\n"
-        f"Место по прибыли раунда: {r.rank} из {r.teams_scored}. "
-        f"Накопленная прибыль: {r.cumulative_profit:.1f}."
+        f"Оценка раунда: {r.br_share:.0%} от прибыли лучшего ответа — место "
+        f"{r.rank} из {r.teams_scored}. Накопленная прибыль: {r.cumulative_profit:.1f}."
     )

@@ -18,13 +18,18 @@ from sqlmodel.ext.asyncio.session import AsyncSession
 
 from config import settings
 from core.beliefs import recover_beliefs
-from core.cases import supported_methods
+from core.cases import REGIME_COLUMN, supported_methods
 from core.defence import DefenceDraw, DefenceQuestion, draw_defence
 from core.market_engine import MarketParameters, nash_equilibrium
 from core.market_events import apply_to_costs, apply_to_demand
 from core.rubric_grader import RubricCriterion, grade_submission
 from core.rubrics import DEFAULT_RUBRICS, rubric_for_method
-from core.trap import Verdict, naive_slope_ratio, trap_verdict
+from core.trap import (
+    Verdict,
+    naive_slope_ratio,
+    procedure_quantities,
+    quantity_verdict,
+)
 from db import repositories as repo
 from db import role_repositories as role_repo
 from db.enums import EngineMode, Method, Role, RoundStatus
@@ -79,9 +84,7 @@ __all__ = [
 # Пилотная рубрика для парной регрессии: используется, если профессор ещё не
 # завёл свой RubricTemplate для метода. Веса в сумме дают 1.0, но грейдер
 # нормирует на сумму весов сам, так что это не жёсткое требование.
-_CRITERIA_ADAPTER: TypeAdapter[list[RubricCriterion]] = TypeAdapter(
-    list[RubricCriterion]
-)
+_CRITERIA_ADAPTER: TypeAdapter[list[RubricCriterion]] = TypeAdapter(list[RubricCriterion])
 
 
 @dataclass(frozen=True)
@@ -290,9 +293,7 @@ async def submit_manual_decision(
     )
 
 
-async def close_round_with_results(
-    session: AsyncSession, round_id: int
-) -> list[ResultRow]:
+async def close_round_with_results(session: AsyncSession, round_id: int) -> list[ResultRow]:
     """Закрыть раунд через существующий сервис и вернуть таблицу результатов.
 
     Сам расчёт делает round_service.close_round (движок Курно + сохранение
@@ -356,12 +357,15 @@ class ReviewRow:
     implied_slope: float
     true_slope: float
     naive_slope: float | None
+    naive_quantity: float  # что подала бы наивная процедура на этих данных
+    sound_quantity: float  # что подала бы верная — при том же ожидании соперников
     expected_price: float
     actual_price: float
     price_gap: float
     profit: float
     best_response_profit: float
     profit_gap: float
+    br_share: float  # доля от прибыли лучшего ответа — оценка раунда
     verdict: Verdict
 
 
@@ -401,10 +405,30 @@ async def review_panel(session: AsyncSession, round_id: int) -> list[ReviewRow] 
     naive_ratio = naive_slope_ratio(round_.method)
     naive_slope = None if naive_ratio is None else naive_ratio * params.b
 
+    # Детектор по процедуре: те же данные, что получила команда, и ожидание
+    # соперников из истории — вердикт не зависит от того, что натворили
+    # другие команды в этом раунде (см. core.trap, вторая половина).
+    dataset = await build_round_dataset(session, round_id)
+    regime = REGIME_COLUMN if any(c.name == REGIME_COLUMN for c in dataset.columns) else None
+    n_firms = max(len(await repo.list_teams(session)), 1)
+
     rows: list[ReviewRow] = []
     for decision in decisions:
-        belief = beliefs[str(decision.team_id)]
+        key = str(decision.team_id)
+        belief = beliefs[key]
         team = await repo.get_team(session, decision.team_id)
+        cost = costs[key] if costs is not None else params.marginal_cost
+        procedures = procedure_quantities(
+            dataset.rows,
+            true_a=params.a,
+            true_b=params.b,
+            marginal_cost=cost,
+            n_firms=n_firms,
+            regime_column=regime,
+        )
+        br_share = (
+            belief.profit / belief.best_response_profit if belief.best_response_profit > 0 else 0.0
+        )
         rows.append(
             ReviewRow(
                 team_name=team.name if team is not None else f"team {decision.team_id}",
@@ -414,16 +438,20 @@ async def review_panel(session: AsyncSession, round_id: int) -> list[ReviewRow] 
                 implied_slope=belief.implied_slope,
                 true_slope=params.b,
                 naive_slope=naive_slope,
+                naive_quantity=procedures.naive_quantity,
+                sound_quantity=procedures.sound_quantity,
                 expected_price=belief.expected_price,
                 actual_price=belief.actual_price,
                 price_gap=belief.price_gap,
                 profit=belief.profit,
                 best_response_profit=belief.best_response_profit,
                 profit_gap=belief.profit_gap,
-                verdict=trap_verdict(belief.implied_slope, params.b, naive_ratio),
+                br_share=br_share,
+                verdict=quantity_verdict(belief.submitted_quantity, procedures, naive_ratio),
             )
         )
-    rows.sort(key=lambda r: r.profit_gap, reverse=True)
+    # Худшие по доле от лучшего ответа сверху — с них начинается разбор.
+    rows.sort(key=lambda r: r.br_share)
     return rows
 
 
@@ -546,9 +574,7 @@ async def market_brief(session: AsyncSession, round_id: int) -> MarketBrief | No
     )
 
 
-async def team_role_progress(
-    session: AsyncSession, *, round_id: int, team_id: int
-) -> TeamProgress:
+async def team_role_progress(session: AsyncSession, *, round_id: int, team_id: int) -> TeamProgress:
     """Кто из ролей команды уже подал предложение (RoleInput) в раунде.
 
     Числа предложений раскрываются только после фиксации решения lead'ом
@@ -557,9 +583,7 @@ async def team_role_progress(
     """
     decision = await repo.get_decision(session, team_id=team_id, round_id=round_id)
     lead_locked = decision is not None
-    inputs = await role_repo.list_role_inputs_for_team(
-        session, round_id=round_id, team_id=team_id
-    )
+    inputs = await role_repo.list_role_inputs_for_team(session, round_id=round_id, team_id=team_id)
     by_role = {i.role: i for i in inputs}
 
     rows: list[RoleProgressRow] = []
@@ -601,9 +625,7 @@ async def teacher_summary(session: AsyncSession) -> TeacherSummary:
     if open_round_ is not None:
         assert open_round_.id is not None  # прочитан из БД
         open_round_number = open_round_.number
-        decisions_submitted = len(
-            await repo.list_decisions_for_round(session, open_round_.id)
-        )
+        decisions_submitted = len(await repo.list_decisions_for_round(session, open_round_.id))
 
     return TeacherSummary(
         teams_total=len(teams),
@@ -672,9 +694,7 @@ class RoundHistoryRow:
     decisions: int
 
 
-async def scenario_dataset(
-    session: AsyncSession, round_id: int
-) -> ScenarioDataset | None:
+async def scenario_dataset(session: AsyncSession, round_id: int) -> ScenarioDataset | None:
     """Публичные сырые данные сценария для превью, если раунд — «Нефть РФ 2013».
 
     Сценарий распознаётся по командам: у каждой должна быть компания из
@@ -692,9 +712,7 @@ async def scenario_dataset(
     if round_ is None:
         return None
     teams = await repo.list_teams(session)
-    if not teams or any(
-        t.company_name not in OIL_PRODUCTION_2013_MLN_T for t in teams
-    ):
+    if not teams or any(t.company_name not in OIL_PRODUCTION_2013_MLN_T for t in teams):
         return None
 
     return ScenarioDataset(
@@ -749,9 +767,7 @@ async def firm_card(session: AsyncSession, round_id: int, team_id: int) -> FirmC
     n_firms = max(len(await repo.list_teams(session)), 1)
     if round_.engine_mode is EngineMode.ASYMMETRIC:
         truths = await role_repo.list_ground_truths_for_round(session, round_id)
-        cost = next(
-            (t.implied_marginal_cost for t in truths if t.team_id == team_id), None
-        )
+        cost = next((t.implied_marginal_cost for t in truths if t.team_id == team_id), None)
         if cost is None:
             raise ValueError(
                 f"asymmetric round {round_id}: у команды {team.name} нет "
@@ -825,9 +841,7 @@ async def equilibrium_comparison(
     for decision in decisions:
         team = await repo.get_team(session, decision.team_id)
         team_labels[decision.team_id] = (
-            f"{team.name} ({team.company_name})"
-            if team is not None
-            else f"team {decision.team_id}"
+            f"{team.name} ({team.company_name})" if team is not None else f"team {decision.team_id}"
         )
 
     if round_.engine_mode is EngineMode.ASYMMETRIC:
@@ -844,9 +858,7 @@ async def equilibrium_comparison(
             round_.market_b,
             [costs_by_team[d.team_id] for d in decisions],
         )
-        eq_quantities = dict(
-            zip((d.team_id for d in decisions), result.quantities, strict=True)
-        )
+        eq_quantities = dict(zip((d.team_id for d in decisions), result.quantities, strict=True))
         eq_price = result.price
         eq_total = result.total_quantity
     else:
@@ -931,9 +943,7 @@ def build_grading_llm() -> StructuredLLM:
     return GroqClient(settings.groq_api_key)
 
 
-async def ensure_rubric_for_method(
-    session: AsyncSession, method: Method
-) -> list[RubricCriterion]:
+async def ensure_rubric_for_method(session: AsyncSession, method: Method) -> list[RubricCriterion]:
     """Вернуть рубрику метода; без шаблона в базе — завести из `core.rubrics`.
 
     Читает RubricTemplate через существующий репозиторий. Если шаблона нет,
@@ -1043,9 +1053,7 @@ async def grade_round_reasoning(
                 f"decision {decision.id} has no market result — закройте "
                 "раунд через дашборд, чтобы результаты посчитались"
             )
-        grading = await grade_submission(
-            decision.reasoning, rubric, llm, reference_notes=notes
-        )
+        grading = await grade_submission(decision.reasoning, rubric, llm, reference_notes=notes)
         await repo.save_result(
             session,
             decision_id=decision.id,
