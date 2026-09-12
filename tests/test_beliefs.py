@@ -151,6 +151,22 @@ def test_lower_cost_team_has_larger_best_response(params: MarketParameters) -> N
     assert beliefs["lo"].expected_price < beliefs["hi"].expected_price
 
 
+def test_profit_uses_each_teams_own_cost(params: MarketParameters) -> None:
+    """Прибыль в разборе считается по c_i команды, а не по общей издержке
+    рынка: иначе в асимметричном раунде разрыв в прибыли врёт."""
+    decisions = {"lo": 25.0, "hi": 25.0}
+    costs = {"lo": 5.0, "hi": 20.0}
+    beliefs = recover_beliefs(decisions, params, marginal_costs=costs)
+
+    price = params.a - params.b * 50.0
+    assert beliefs["lo"].profit == pytest.approx((price - 5.0) * 25.0)
+    assert beliefs["hi"].profit == pytest.approx((price - 20.0) * 25.0)
+    assert beliefs["lo"].profit > beliefs["hi"].profit
+    # Лучший ответ считается на тех же издержках — разрыв не отрицателен.
+    assert beliefs["lo"].profit_gap >= -1e-9
+    assert beliefs["hi"].profit_gap >= -1e-9
+
+
 def test_symmetric_default_matches_explicit_equal_costs(params: MarketParameters) -> None:
     decisions = {"a": 20.0, "b": 24.0, "c": 28.0}
     default = recover_beliefs(decisions, params)

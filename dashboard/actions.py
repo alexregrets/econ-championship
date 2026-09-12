@@ -17,8 +17,12 @@ from pydantic import TypeAdapter
 from sqlmodel.ext.asyncio.session import AsyncSession
 
 from config import settings
+from core.beliefs import recover_beliefs
 from core.cases import supported_methods
+from core.market_engine import MarketParameters
+from core.market_events import apply_to_costs, apply_to_demand
 from core.rubric_grader import RubricCriterion, grade_submission
+from core.trap import Verdict, naive_slope_ratio, trap_verdict
 from db import repositories as repo
 from db import role_repositories as role_repo
 from db.enums import EngineMode, Method, Role, RoundStatus
@@ -33,7 +37,13 @@ from services.dataset_export import (
     to_xlsx,
 )
 from services.round_brief import render_team_brief
-from services.round_service import close_round, open_round
+from services.round_service import (
+    asymmetric_costs,
+    close_round,
+    effective_parameters,
+    open_round,
+    round_shocks,
+)
 
 __all__ = [
     "DEFAULT_OLS_SIMPLE_RUBRIC",
@@ -283,6 +293,98 @@ async def results_table(session: AsyncSession, round_id: int) -> list[ResultRow]
         )
     # Сортировка по прибыли — победители сверху, как на лидерборде.
     rows.sort(key=lambda r: r.market_score, reverse=True)
+    return rows
+
+
+# --------------------------------------------------------------------------- #
+# Панель разбора препода: во что верила команда, кто попался на ловушку
+# --------------------------------------------------------------------------- #
+
+
+@dataclass(frozen=True)
+class ReviewRow:
+    """Одна команда в разборе закрытого раунда.
+
+    Содержит истинный наклон рынка — это страница препода, командам такой
+    строки не показывать (см. :func:`review_panel`: до закрытия — ``None``).
+    Знаки разрывов как в :mod:`core.beliefs`: положительное = «плохо».
+    """
+
+    team_name: str
+    company_name: str
+    quantity: float
+    best_response_quantity: float
+    implied_slope: float
+    true_slope: float
+    naive_slope: float | None
+    expected_price: float
+    actual_price: float
+    price_gap: float
+    profit: float
+    best_response_profit: float
+    profit_gap: float
+    verdict: Verdict
+
+
+async def review_panel(session: AsyncSession, round_id: int) -> list[ReviewRow] | None:
+    """Разбор закрытого раунда: убеждения команд и вердикт детектора.
+
+    ``None``, пока раунд не закрыт или его нет: разбор раскрывает истинные
+    параметры, и до закрытия ему на экране делать нечего. Параметры берутся
+    **эффективные** — после событий раунда, ровно те, на которых раунд
+    считался; издержки в асимметричном раунде — пофирменные, как в
+    :func:`services.round_service.compute_round_results`.
+
+    Строки отсортированы по разрыву в прибыли: кого ловушка ударила сильнее,
+    тот сверху — с него препод и начинает разбор.
+    """
+    round_ = await repo.get_round(session, round_id)
+    if round_ is None or round_.status is not RoundStatus.CLOSED:
+        return None
+    decisions = await repo.list_decisions_for_round(session, round_id)
+    if not decisions:
+        return []
+
+    quantities = {str(d.team_id): d.quantity for d in decisions}
+    shocks = await round_shocks(session, round_id)
+    costs: dict[str, float] | None
+    if round_.engine_mode is EngineMode.ASYMMETRIC:
+        a, b = apply_to_demand(round_.market_a, round_.market_b, shocks)
+        costs = apply_to_costs(
+            await asymmetric_costs(session, round_, decisions), shocks, demand_intercept=a
+        )
+        params = MarketParameters(a=a, b=b, marginal_cost=round_.market_mc)
+    else:
+        costs = None
+        params = effective_parameters(round_, shocks)
+
+    beliefs = recover_beliefs(quantities, params, marginal_costs=costs)
+    naive_ratio = naive_slope_ratio(round_.method)
+    naive_slope = None if naive_ratio is None else naive_ratio * params.b
+
+    rows: list[ReviewRow] = []
+    for decision in decisions:
+        belief = beliefs[str(decision.team_id)]
+        team = await repo.get_team(session, decision.team_id)
+        rows.append(
+            ReviewRow(
+                team_name=team.name if team is not None else f"team {decision.team_id}",
+                company_name=team.company_name if team is not None else "",
+                quantity=belief.submitted_quantity,
+                best_response_quantity=belief.best_response_quantity,
+                implied_slope=belief.implied_slope,
+                true_slope=params.b,
+                naive_slope=naive_slope,
+                expected_price=belief.expected_price,
+                actual_price=belief.actual_price,
+                price_gap=belief.price_gap,
+                profit=belief.profit,
+                best_response_profit=belief.best_response_profit,
+                profit_gap=belief.profit_gap,
+                verdict=trap_verdict(belief.implied_slope, params.b, naive_ratio),
+            )
+        )
+    rows.sort(key=lambda r: r.profit_gap, reverse=True)
     return rows
 
 

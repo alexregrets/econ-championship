@@ -20,9 +20,11 @@ _PROJECT_ROOT = Path(__file__).resolve().parents[2]
 if str(_PROJECT_ROOT) not in sys.path:
     sys.path.insert(0, str(_PROJECT_ROOT))
 
+from core.trap import Verdict  # noqa: E402
 from dashboard.actions import (  # noqa: E402
     METHOD_CHOICES,
     ResultRow,
+    ReviewRow,
     RoundHistoryRow,
     TeacherSummary,
     build_grading_llm,
@@ -31,6 +33,7 @@ from dashboard.actions import (  # noqa: E402
     grade_round_reasoning,
     next_round_number,
     results_table,
+    review_panel,
     rounds_history,
     submit_manual_decision,
     teacher_summary,
@@ -239,6 +242,58 @@ def render_result_charts(rows: list[ResultRow], round_number: int) -> None:
         )
 
 
+
+_VERDICT_LABELS: dict[Verdict, str] = {
+    Verdict.SOUND: "✅ метод применён",
+    Verdict.TRAPPED: "🚩 попался на ловушку",
+    Verdict.OFF: "❓ ни то ни другое — смотреть отчёт",
+    Verdict.NO_TRAP: "— ловушки в этом методе нет",
+}
+
+
+def render_review_panel(round_: Round) -> None:
+    """Панель разбора закрытого раунда: во что верила команда, кто попался.
+
+    Показывает истинный наклон — только на странице препода. Худшие по разрыву
+    в прибыли сверху: с них разбор и начинается.
+    """
+    assert round_.id is not None
+    try:
+        rows: list[ReviewRow] | None = run_db(partial(review_panel, round_id=round_.id))
+    except ValueError as exc:
+        st.warning(f"Разбор не собирается: {exc}")
+        return
+    if rows is None:
+        return
+    if not rows:
+        st.info("Разбирать нечего — решений в раунде не было.")
+        return
+
+    st.markdown(f"**Разбор раунда №{round_.number}: во что верила каждая команда**")
+    st.table(
+        [
+            {
+                "команда": f"{r.team_name} ({r.company_name})",
+                "вердикт": _VERDICT_LABELS[r.verdict],
+                "Q сдано": round(r.quantity, 2),
+                "Q лучший ответ": round(r.best_response_quantity, 2),
+                "b̂ неявный": round(r.implied_slope, 3),
+                "b истинный": round(r.true_slope, 3),
+                "b наивный": "—" if r.naive_slope is None else round(r.naive_slope, 3),
+                "ждала цену": round(r.expected_price, 2),
+                "цена факт": round(r.actual_price, 2),
+                "недобор прибыли": round(r.profit_gap, 2),
+            }
+            for r in rows
+        ]
+    )
+    st.caption(
+        "b̂ восстановлен из сданного объёма против фактического выпуска "
+        "соперников. Если соперник затопил рынок, верно сыгравшая команда "
+        "покажет «ни то ни другое» — это не ошибка команды, смотреть её отчёт."
+    )
+
+
 def render_history(history: list[RoundHistoryRow]) -> None:
     """История закрытых раундов: таблица + графики цены и средней прибыли.
 
@@ -317,6 +372,7 @@ def main() -> None:
             rows = run_db(partial(results_table, round_id=round_.id))
             render_results(rows)
             render_result_charts(rows, round_.number)
+            render_review_panel(round_)
 
     render_history(run_db(rounds_history))
 

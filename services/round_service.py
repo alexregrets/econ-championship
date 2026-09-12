@@ -31,6 +31,7 @@ __all__ = [
     "round_shocks",
     "effective_parameters",
     "compute_round_results",
+    "asymmetric_costs",
     "score_roles",
     "close_round",
 ]
@@ -89,7 +90,7 @@ def effective_parameters(
     return apply_to_parameters(base, shocks)
 
 
-async def _asymmetric_costs(
+async def asymmetric_costs(
     session: AsyncSession, round_: Round, decisions: list[Decision]
 ) -> dict[str, float]:
     """Collect per-team implied marginal costs for an asymmetric round.
@@ -150,7 +151,7 @@ async def compute_round_results(
     ValueError
         If the round does not exist, has no submitted decisions, is an
         asymmetric round missing per-team implied costs (see
-        :func:`_asymmetric_costs`), or if this round's events leave the market
+        :func:`asymmetric_costs`), or if this round's events leave the market
         unviable — costs at or above the demand choke price. Refusing is
         deliberate: a market nobody can profitably produce in is a setup error,
         and scoring it anyway would hand teams meaningless numbers.
@@ -173,7 +174,7 @@ async def compute_round_results(
         # раунд и будет считаться, а не против исходного.
         a, b = apply_to_demand(round_.market_a, round_.market_b, shocks)
         costs = apply_to_costs(
-            await _asymmetric_costs(session, round_, decisions),
+            await asymmetric_costs(session, round_, decisions),
             shocks,
             demand_intercept=a,
         )

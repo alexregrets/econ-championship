@@ -143,8 +143,8 @@ def recover_beliefs(
 
     costs = _resolve_costs(decisions, params, marginal_costs)
 
-    # Фактические цена и прибыль — из того же движка, что считает раунд:
-    # разбор обязан говорить о тех же числах, которые видели команды.
+    # Фактическая цена — из того же движка, что считает раунд: разбор обязан
+    # говорить о тех же числах, которые видели команды.
     results = compute_cournot_round(decisions, params)
     total_quantity = math.fsum(decisions.values())
 
@@ -167,7 +167,10 @@ def recover_beliefs(
             best_response_profit = params.b * best_response_quantity**2
 
         actual_price = results[team_id].price
-        profit = results[team_id].profit
+        # Прибыль — по издержкам самой команды, а не по общей издержке рынка:
+        # симметричный движок знает только params.marginal_cost, а в
+        # асимметричном раунде у каждой фирмы свой c_i.
+        profit = (actual_price - cost) * quantity
 
         beliefs[team_id] = RecoveredBelief(
             team_id=team_id,

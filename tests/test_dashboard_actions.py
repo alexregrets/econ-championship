@@ -382,3 +382,100 @@ def test_method_choices_are_exactly_supported_cases() -> None:
     for method, label in METHOD_CHOICES.items():
         assert isinstance(method, Method)
         assert label and label != method.value
+
+
+# --------------------------------------------------------------------------- #
+# Панель разбора: во что верила команда и кто попался на ловушку
+# --------------------------------------------------------------------------- #
+
+
+async def _regime_round_with_three_teams(session: AsyncSession) -> tuple[int, list[int]]:
+    """Раунд по режимному сдвигу (a=100, b=1, c=10) с тремя командами."""
+    team_ids: list[int] = []
+    for i in range(3):
+        team = await repo.create_team(session, name=f"T{i}", company_name=f"C{i}")
+        assert team.id is not None
+        team_ids.append(team.id)
+    round_ = await create_and_open_round(
+        session,
+        number=1,
+        difficulty=2,
+        market_a=100.0,
+        market_b=1.0,
+        market_mc=10.0,
+        case_narrative="",
+        method=Method.OLS_MULTIPLE,
+    )
+    assert round_.id is not None
+    return round_.id, team_ids
+
+
+async def test_review_panel_hidden_until_round_closed(session: AsyncSession) -> None:
+    """До закрытия разбор не показывается: он содержит истинный наклон."""
+    from dashboard.actions import review_panel
+
+    round_id, team_ids = await _regime_round_with_three_teams(session)
+    await submit_manual_decision(
+        session, team_id=team_ids[0], round_id=round_id, quantity=22.5, reasoning=""
+    )
+    assert await review_panel(session, round_id) is None
+
+
+async def test_review_panel_flags_naive_team_and_clears_nash_team(
+    session: AsyncSession,
+) -> None:
+    from core.trap import Verdict
+    from dashboard.actions import review_panel
+
+    round_id, team_ids = await _regime_round_with_three_teams(session)
+    # Нэш при трёх фирмах: q = (a - c) / (b (n+1)) = 22.5. Две команды играют
+    # Нэш, третья — так, будто наклон 0.35: q = (A_i - c) / (2 · 0.35 · b),
+    # где A_i = a - b · 45 = 55 → q = 45 / 0.7 ≈ 64.29.
+    quantities = {team_ids[0]: 22.5, team_ids[1]: 22.5, team_ids[2]: 45.0 / 0.7}
+    for team_id, q in quantities.items():
+        await submit_manual_decision(
+            session, team_id=team_id, round_id=round_id, quantity=q, reasoning=""
+        )
+    await close_round_with_results(session, round_id)
+
+    rows = await review_panel(session, round_id)
+    assert rows is not None
+    by_team = {row.team_name: row for row in rows}
+    assert by_team["T2"].verdict is Verdict.TRAPPED
+    assert by_team["T2"].implied_slope == pytest.approx(0.35, rel=1e-6)
+    # У Нэш-команд остаточный спрос просел из-за перепроизводства соперника:
+    # A_i = 100 - 22.5 - 64.29 ≈ 13.2, b̂ = (A_i - 10) / 45 ≈ 0.07. Детектор судит по
+    # фактическому Q_-i, а не по ожиданиям команды, поэтому верная игра против
+    # затопившего рынок соперника даёт OFF, не SOUND. Это ограничение метода,
+    # оно названо в панели; здесь фиксируем ровно «не попался».
+    for name in ("T0", "T1"):
+        assert by_team[name].verdict is Verdict.OFF
+        expected_slope = (100.0 - 22.5 - 45.0 / 0.7 - 10.0) / 45.0
+        assert by_team[name].implied_slope == pytest.approx(expected_slope, rel=1e-6)
+    # Наивная команда ждала цену выше фактической и недобрала прибыль.
+    assert by_team["T2"].price_gap > 0
+    assert by_team["T2"].profit_gap > 0
+    assert by_team["T2"].true_slope == 1.0
+    assert by_team["T2"].naive_slope == pytest.approx(0.35)
+    # Строки отсортированы по разрыву в прибыли — худшие сверху.
+    assert rows[0].team_name == "T2"
+
+
+async def test_review_panel_no_trap_for_simple_regression(session: AsyncSession) -> None:
+    from core.trap import Verdict
+    from dashboard.actions import review_panel
+
+    team = await repo.create_team(session, name="solo", company_name="S")
+    assert team.id is not None
+    round_id = await _make_round(session)
+    await submit_manual_decision(
+        session, team_id=team.id, round_id=round_id, quantity=45.0, reasoning=""
+    )
+    await close_round_with_results(session, round_id)
+    rows = await review_panel(session, round_id)
+    assert rows is not None and len(rows) == 1
+    assert rows[0].verdict is Verdict.NO_TRAP
+    assert rows[0].naive_slope is None
+    # Монополист на Нэше: наклон истинный, разрывы нулевые.
+    assert rows[0].implied_slope == pytest.approx(1.0)
+    assert rows[0].profit_gap == pytest.approx(0.0, abs=1e-9)
